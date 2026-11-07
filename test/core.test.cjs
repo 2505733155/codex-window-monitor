@@ -68,3 +68,28 @@ test('root replacement extracts current status; root removal and invalid operati
  state.ingest(snap('owner',{type:'idle'},4));const invalid=patch(4,5,{type:'active'});invalid.params.change.patches[0].op='move';state.ingest(invalid);
  assert.equal(state.snapshot().rows[0].status,'unknown');assert.equal(requests,2);
 });
+
+test('manual blocking belongs to a window without changing session status or duration',()=>{
+ let now=1000;const state=new MonitorState({clock:()=>now});state.connected();state.ingest(snap());state.ingest(snap('second'));
+ const another=snap();another.params.conversationId='other-thread';state.ingest(another);
+ const row=state.windowSnapshot().rows.find(row=>row.ownerClientId==='owner'),since=row.since;
+ now=5000;state.setBlocked(row.id,true,'  等待外部资料  ');
+ let blocked=state.windowSnapshot().rows.find(value=>value.id===row.id);
+ assert.equal(blocked.blocked,true);assert.equal(blocked.blockReason,'等待外部资料');assert.equal(blocked.since,since);assert.equal(blocked.status,'idle');assert.equal(blocked.sessionCount,2);
+ assert.equal(state.windowSnapshot().rows.find(value=>value.ownerClientId==='second').blocked,false);
+ assert.ok(state.snapshot().rows.every(value=>value.blocked===undefined),'collector snapshots stay per-session and unchanged');
+ state.ingest(patch(1,2,{type:'active'}));blocked=state.windowSnapshot().rows.find(value=>value.id===row.id);
+ assert.equal(blocked.blocked,true);assert.equal(blocked.status,'busy');assert.equal(blocked.blockReason,'等待外部资料');
+ state.setBlocked(row.id,true,'');assert.equal(state.windowSnapshot().rows.find(value=>value.id===row.id).blockReason,'');
+ state.setBlocked(row.id,false);blocked=state.windowSnapshot().rows.find(value=>value.id===row.id);
+ assert.equal(blocked.blocked,false);assert.equal(blocked.blockReason,'');assert.equal(blocked.status,'busy');
+});
+
+test('manual blocking validates input and is forgotten when the window is removed',()=>{
+ const state=new MonitorState();state.connected();state.ingest(snap());const id=state.windowSnapshot().rows[0].id;
+ assert.throws(()=>state.setBlocked(id,'yes',''),{status:400});
+ assert.throws(()=>state.setBlocked(id,true,'x'.repeat(501)),{status:400});
+ assert.throws(()=>state.setBlocked('missing',true,''),{status:404});
+ state.setBlocked(id,true,'暂缓');state.disconnected();assert.equal(state.windowSnapshot().rows[0].blocked,true);
+ state.removeClient('owner');state.ingest(snap());assert.equal(state.windowSnapshot().rows[0].blocked,false);
+});

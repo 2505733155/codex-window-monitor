@@ -3,6 +3,7 @@ const $=id=>document.getElementById(id);
 const labels={idle:'空闲',busy:'执行中',attention:'待处理',unknown:'未知'};
 let snapshot={rows:[],connection:'connecting'},linked=false,lastMessage=0,selectedId=null,filter='all';
 let navigating=false,navigationRowId=null;
+let blockRowId=null,blockSaving=false;
 try{filter=localStorage.getItem('codex-filter')||'all';$('search').value=localStorage.getItem('codex-search')||'';$('idle-first').checked=localStorage.getItem('codex-idle-first')!=='false';}catch{}
 if(!['all','idle','busy','other'].includes(filter))filter='all';
 function element(tag,className,text){const node=document.createElement(tag);if(className)node.className=className;if(text!==undefined)node.textContent=text;return node;}
@@ -19,23 +20,29 @@ function save(){try{localStorage.setItem('codex-filter',filter);localStorage.set
 function render(){
  const rows=snapshot.rows.map(effective);const query=$('search').value.trim().toLowerCase();
  let visible=rows.filter(row=>(filter==='all'||row.status===filter||filter==='other'&&!['idle','busy'].includes(row.status))&&(row.name+' '+row.cwd).toLowerCase().includes(query));
- if($('idle-first').checked)visible.sort((a,b)=>(a.status==='idle'?0:1)-(b.status==='idle'?0:1)||a.name.localeCompare(b.name));
+ visible.sort((a,b)=>Number(!!a.blocked)-Number(!!b.blocked)||($('idle-first').checked?(a.status==='idle'?0:1)-(b.status==='idle'?0:1)||a.name.localeCompare(b.name):0));
  const counts={all:rows.length,idle:0,busy:0,other:0};for(const row of rows)counts[['idle','busy'].includes(row.status)?row.status:'other']++;
  for(const key of Object.keys(counts))$('count-'+key).textContent=counts[key];
  document.querySelectorAll('[data-filter]').forEach(button=>{button.classList.toggle('active',button.dataset.filter===filter);button.setAttribute('aria-pressed',String(button.dataset.filter===filter));});
  const body=$('rows');body.replaceChildren();
  if(!visible.length){const tr=element('tr'),td=element('td','empty',rows.length?'没有匹配的窗口':'尚未发现 Codex 窗口；请确认 VS Code 中已打开 Codex 面板。');td.colSpan=4;tr.append(td);body.append(tr);}
  for(const row of visible){
-  const tr=element('tr'),projectCell=element('td'),project=element('div','project'),folder=element('span','folder','▱'),info=element('div'),name=element('div','project-name',row.name);
+  const tr=element('tr',row.blocked?'blocked-row':''),projectCell=element('td'),project=element('div','project'),folder=element('span','folder','▱'),info=element('div'),name=element('div','project-name',row.name);
   folder.setAttribute('aria-hidden','true');
   if(row.mapping==='ambiguous')name.append(element('span','short-id',row.ownerClientId.slice(0,6)));
   if(row.sessionCount>1)name.append(element('span','session-count',row.sessionCount+' 个会话'));
-  const directory=element('div','project-path',row.cwd||'目录待识别');directory.title=row.cwd;info.append(name,directory);project.append(folder,info);projectCell.append(project);
+  if(row.blocked)name.append(element('span','block-tag','已阻塞'));
+  const directory=element('div','project-path',row.cwd||'目录待识别');directory.title=row.cwd;info.append(name,directory);
+  if(row.blocked){const note=element('div','block-note',row.blockReason||'未填写阻塞原因');note.title=row.blockReason||'未填写阻塞原因';info.append(note);}
+  project.append(folder,info);projectCell.append(project);
   const statusCell=element('td'),badge=element('span','badge '+row.status),dot=element('i','dot');badge.append(dot,document.createTextNode(labels[row.status]||'未知'));statusCell.append(badge,element('div','state-note',row.reason));
   const timeCell=element('td'),elapsed=element('div','elapsed',duration(row));elapsed.dataset.duration=row.id;elapsed.append(element('small',null,row.status==='unknown'?'状态未确认':row.sinceKnown?(row.status==='idle'?'空闲时长':'当前状态时长'):'监测以来'));timeCell.append(elapsed);
   const actionCell=element('td'),actions=element('div','row-actions'),go=element('button','detail-button go-button',navigating&&navigationRowId===row.id?'正在前往…':'前往窗口');
   go.dataset.windowAction=row.id;go.disabled=navigating;go.setAttribute('aria-label','前往 '+row.name+' 所在的窗口');go.addEventListener('click',()=>navigateWindow(row.id));
-  const button=element('button','detail-button','详情 ↗');button.setAttribute('aria-label','查看 '+row.name+' 的详情');button.addEventListener('click',()=>{selectedId=row.id;renderDetail();$('detail').showModal();});actions.append(go,button);actionCell.append(actions);
+  const button=element('button','detail-button','详情 ↗');button.setAttribute('aria-label','查看 '+row.name+' 的详情');button.addEventListener('click',()=>{selectedId=row.id;renderDetail();$('detail').showModal();});actions.append(go,button);
+  const block=element('button','detail-button',row.blocked?'编辑原因':'标记阻塞');block.dataset.blockAction=row.id;block.disabled=blockSaving;block.setAttribute('aria-label',(row.blocked?'编辑阻塞原因：':'标记阻塞：')+row.name);block.addEventListener('click',()=>openBlock(row.id));actions.append(block);
+  if(row.blocked){const restore=element('button','detail-button restore-button','解除阻塞');restore.dataset.blockAction=row.id;restore.disabled=blockSaving;restore.setAttribute('aria-label','解除阻塞：'+row.name);restore.addEventListener('click',()=>setWindowBlocked(row.id,false));actions.append(restore);}
+  actionCell.append(actions);
   tr.append(projectCell,statusCell,timeCell,actionCell);body.append(tr);
  }
  $('showing').textContent='显示 '+visible.length+' / '+rows.length+' 个已发现窗口 · 共 '+(snapshot.sessionCount??rows.length)+' 个会话';
@@ -48,6 +55,7 @@ function renderDetail(){
  const original=snapshot.rows.find(row=>row.id===selectedId);if(!original){$('detail').close();return;}const row=effective(original);
  $('detail-title').textContent=row.name;$('detail-fields').replaceChildren();
  const fields=[['项目目录',row.cwd||'待识别'],['Codex 状态',(labels[row.status]||'未知')+' · '+row.reason],['状态持续',duration(row,true)],['窗口对应',row.mapping==='project-match'?'已按项目目录核对':row.mapping==='ambiguous'?'同目录存在多个窗口，实际归属待确认':'窗口归属待确认'],['最后确认',row.lastSeen?new Date(row.lastSeen).toLocaleString():'尚未确认'],['窗口标识',row.ownerClientId.slice(0,8)],['会话数量',String(row.sessionCount||1)]];
+ if(row.blocked)fields.splice(2,0,['阻塞原因',row.blockReason||'未填写原因']);
  for(const [title,value]of fields){const dd=element('dd',null,value);if(title==='状态持续')dd.id='detail-duration';$('detail-fields').append(element('dt',null,title),dd);}
  const list=$('detail-sessions');if(list){
   list.replaceChildren();
@@ -60,6 +68,29 @@ function renderDetail(){
    list.append(card);
   }
  }
+}
+function openBlock(rowId){
+ if(blockSaving)return;
+ const row=snapshot.rows.find(value=>value.id===rowId);if(!row)return;
+ blockRowId=rowId;$('block-project').textContent=row.name;$('block-reason').value=row.blockReason||'';$('block-error').hidden=true;
+ $('save-block').textContent=row.blocked?'保存原因':'标记阻塞';$('block-dialog').showModal();$('block-reason').focus();
+}
+function blockButtons(){
+ document.querySelectorAll('[data-block-action]').forEach(button=>{button.disabled=blockSaving;});
+ for(const id of ['save-block','cancel-block','close-block','block-reason']){const node=$(id);if(node)node.disabled=blockSaving;}
+}
+async function setWindowBlocked(rowId,blocked,reason=''){
+ if(blockSaving)return;blockSaving=true;blockButtons();
+ const dialog=$('block-dialog'),errorNode=$('block-error');if(errorNode)errorNode.hidden=true;
+ try{
+  const response=await fetch('/api/block',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({rowId,blocked,reason}),signal:AbortSignal.timeout(10000)});
+  const result=await response.json();if(!response.ok)throw new Error(result.error||'修改阻塞标记失败，请重试');
+  if(dialog?.open&&blockRowId===rowId)dialog.close();
+  navigationMessage(blocked?'阻塞标记已保存，窗口将排到列表末尾。':'已解除阻塞，恢复正常排序。');
+ }catch(error){
+  const message=error.name==='TimeoutError'?'请求超时，请重试':error.message||'无法连接监控服务，请重试';
+  if(dialog?.open&&blockRowId===rowId){errorNode.textContent=message;errorNode.hidden=false;}else navigationMessage(message,true);
+ }finally{blockSaving=false;blockButtons();}
 }
 function navigationMessage(message,error=false){const node=$('window-message');node.textContent=message;node.hidden=false;node.classList.toggle('error',error);}
 function navigationButtons(){
@@ -92,6 +123,9 @@ $('search').addEventListener('input',()=>{save();render();});$('idle-first').add
 $('close-detail').addEventListener('click',()=>$('detail').close());$('detail').addEventListener('click',event=>{if(event.target===$('detail')){const r=$('detail').getBoundingClientRect();if(event.clientX<r.left||event.clientX>r.right||event.clientY<r.top||event.clientY>r.bottom)$('detail').close();}});
 $('close-window-picker')?.addEventListener('click',()=>{if(!navigating)$('window-picker').close();});
 $('window-picker')?.addEventListener('cancel',event=>{if(navigating)event.preventDefault();});
+$('block-form')?.addEventListener('submit',event=>{event.preventDefault();return setWindowBlocked(blockRowId,true,$('block-reason').value);});
+for(const id of ['cancel-block','close-block'])$(id)?.addEventListener('click',()=>{if(!blockSaving)$('block-dialog').close();});
+$('block-dialog')?.addEventListener('cancel',event=>{if(blockSaving)event.preventDefault();});
 let stream;
 function connect(){
  stream?.close();const current=new EventSource('/events');stream=current;

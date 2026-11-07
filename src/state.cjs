@@ -17,7 +17,7 @@ function classify(value){
  return ['unknown',value?.type==='notLoaded'?'会话未加载':'无法确认执行状态'];
 }
 class MonitorState extends EventEmitter{
- constructor({clock=Date.now}={}){super();this.clock=clock;this.rows=new Map();this.windowTimings=new Map();this.connection='connecting';this.connectionReason='正在连接 Codex';this.sequence=0;}
+ constructor({clock=Date.now}={}){super();this.clock=clock;this.rows=new Map();this.windowTimings=new Map();this.windowBlocks=new Map();this.connection='connecting';this.connectionReason='正在连接 Codex';this.sequence=0;}
  changed(){this.sequence++;this.windowSnapshot();this.emit('change',this.snapshot());}
  connected(){this.connection='connected';this.connectionReason='已连接 Codex';this.changed();}
  disconnected(reason='采集连接中断'){
@@ -32,6 +32,13 @@ class MonitorState extends EventEmitter{
  setMapping(ownerId,threadId,ideClientId){
   for(const row of this.rows.values())if(row.ownerClientId===ownerId&&row.threadId===threadId){row.ideClientId=ideClientId||null;}
   this.changed();
+ }
+ setBlocked(rowId,blocked,reason=''){
+  if(typeof rowId!=='string'||!rowId.length||rowId.length>500||typeof blocked!=='boolean'||typeof reason!=='string'||reason.length>500)throw Object.assign(new Error('无效的阻塞标记或原因过长（最多 500 字）'),{status:400});
+  if(!this.windowSnapshot().rows.some(row=>row.id===rowId))throw Object.assign(new Error('该窗口已离线，请刷新后重试'),{status:404});
+  const blockReason=blocked?reason.trim():'';
+  if(blocked)this.windowBlocks.set(rowId,blockReason);else this.windowBlocks.delete(rowId);
+  this.changed();return {id:rowId,blocked,blockReason};
  }
  ingest(m){
   if(m?.method!=='thread-stream-state-changed'||m.type!=='broadcast')return;
@@ -110,9 +117,10 @@ class MonitorState extends EventEmitter{
    const reason=members.length===1?representative.reason:members.length+' 个会话：'+Object.keys(counts).filter(key=>counts[key]).map(key=>counts[key]+' '+labels[key]).join('，');
    const sessions=members.map(row=>({id:row.id,threadId:row.threadId,cwd:row.cwd,name:row.name,status:row.status,reason:row.reason,since:row.since,sinceKnown:row.sinceKnown,lastSeen:row.lastSeen}));
    const ideClientId=representative.ideClientId||members.find(row=>row.cwd.toLowerCase()===representative.cwd.toLowerCase()&&row.ideClientId)?.ideClientId||null;
-   rows.push({...representative,id,status,reason,since:timing.since,sinceKnown:timing.sinceKnown,ideClientId,lastSeen:Math.max(...members.map(row=>row.lastSeen||0))||null,sessionCount:sessions.length,sessions});
+   rows.push({...representative,id,blocked:this.windowBlocks.has(id),blockReason:this.windowBlocks.get(id)||'',status,reason,since:timing.since,sinceKnown:timing.sinceKnown,ideClientId,lastSeen:Math.max(...members.map(row=>row.lastSeen||0))||null,sessionCount:sessions.length,sessions});
   }
   for(const id of this.windowTimings.keys())if(!groups.has(id))this.windowTimings.delete(id);
+  for(const id of this.windowBlocks.keys())if(!groups.has(id))this.windowBlocks.delete(id);
   const counts=new Map();const directory=row=>row.cwd?path.win32.normalize(row.cwd).toLowerCase():'';
   for(const row of rows){const key=directory(row);if(key)counts.set(key,(counts.get(key)||0)+1);}
   for(const row of rows)row.mapping=counts.get(directory(row))>1?'ambiguous':row.ideClientId?'project-match':'unconfirmed';

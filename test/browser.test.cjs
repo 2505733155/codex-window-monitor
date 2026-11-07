@@ -10,7 +10,7 @@ test('stalled SSE reconnects and confirms stable state without a new Codex mutat
  streams[1].handlers.state({data:JSON.stringify({rows:[],connection:'connected'})});assert.equal(nodes.get('notice').hidden,true);
 });
 
-function browser(){
+function browser({fetch=async()=>{throw new Error('Unexpected network request');}}={}){
  // The real app runs unchanged; these DOM primitives provide only its browser boundary.
  class TextNode{
   constructor(value){this.value=String(value);this.writes=0;}
@@ -24,16 +24,16 @@ function browser(){
   append(...values){this.children.push(...values.map(value=>typeof value==='string'?new TextNode(value):value));}
   replaceChildren(...values){this.replacements++;this.children=[];this.append(...values);}
   addEventListener(type,fn){this.listeners[type]=fn;}
-  setAttribute(){}showModal(){this.open=true;}close(){this.open=false;}
+  setAttribute(){}focus(){this.focused=true;}showModal(){this.open=true;}close(){this.open=false;}
  }
- const ids=['search','idle-first','rows','count-all','count-idle','count-busy','count-other','showing','connection','notice','detail','detail-title','detail-fields','close-detail'];
+ const ids=['search','idle-first','rows','count-all','count-idle','count-busy','count-other','showing','connection','notice','detail','detail-title','detail-fields','close-detail','window-message','block-dialog','block-form','block-project','block-reason','block-error','save-block','cancel-block','close-block'];
  const nodes=new Map(ids.map(id=>[id,new Element()]));
  const descendants=node=>[node,...(node.children||[]).flatMap(descendants)];
  const all=()=>[...nodes.values()].flatMap(descendants);
- const document={getElementById:id=>nodes.get(id)||all().find(node=>node.id===id)||null,createElement:tag=>new Element(tag),createTextNode:value=>new TextNode(value),querySelectorAll:selector=>selector==='[data-duration]'?all().filter(node=>node.dataset?.duration):[]};
+ const document={getElementById:id=>nodes.get(id)||all().find(node=>node.id===id)||null,createElement:tag=>new Element(tag),createTextNode:value=>new TextNode(value),querySelectorAll:selector=>selector==='[data-duration]'?all().filter(node=>node.dataset?.duration):selector==='[data-block-action]'?all().filter(node=>node.dataset?.blockAction):[]};
  const streams=[];class Stream{constructor(){this.handlers={};streams.push(this);}addEventListener(type,fn){this.handlers[type]=fn;}close(){this.closed=true;}}
  let now=0,tick;class Clock extends Date{static now(){return now;}}
- const context=vm.createContext({document,EventSource:Stream,localStorage:{getItem:()=>null,setItem(){}},Date:Clock,setInterval(fn){tick=fn;}});
+ const context=vm.createContext({document,fetch,AbortSignal,EventSource:Stream,localStorage:{getItem:()=>null,setItem(){}},Date:Clock,setInterval(fn){tick=fn;}});
  vm.runInContext(fs.readFileSync(path.join(__dirname,'../public/app.js'),'utf8'),context);
  return {nodes,context,all,setTime:value=>{now=value;},tick:()=>{streams.at(-1).handlers.heartbeat?.();tick();},send:rows=>streams.at(-1).handlers.state({data:JSON.stringify({rows,connection:'connected'})})};
 }
@@ -72,4 +72,32 @@ test('open detail preserves lower-bound timing and invalidates stale state after
  assert.equal(value(),'至少 1 分 5 秒');page.setTime(66000);page.tick();assert.equal(value(),'至少 1 分 6 秒');
  vm.runInContext('stream.onerror()',page.context);assert.equal(value(),'—');
  assert.equal(page.all().find(node=>node.dataset?.duration===sampleRow.id).firstChild.textContent,'—');
+});
+
+test('blocked windows sort last with either idle-first setting and keep their real state',()=>{
+ const page=browser();
+ const blocked={...sampleRow,id:'blocked',name:'A',blocked:true,blockReason:'等待资料'};
+ const busy={...sampleRow,id:'busy',name:'B',status:'busy'},idle={...sampleRow,id:'idle',name:'Z'};
+ const order=()=>page.nodes.get('rows').children.map(row=>row.children[2].children[0].dataset.duration);
+ page.send([blocked,busy,idle]);assert.deepEqual(order(),['idle','busy','blocked']);
+ page.nodes.get('idle-first').checked=false;page.nodes.get('idle-first').listeners.change();assert.deepEqual(order(),['busy','idle','blocked']);
+ const blockedRow=page.nodes.get('rows').children.at(-1);assert.match(blockedRow.textContent,/空闲/);assert.match(blockedRow.textContent,/已阻塞/);assert.match(blockedRow.textContent,/等待资料/);
+ page.send([{...blocked,blocked:false,blockReason:''},busy,idle]);assert.deepEqual(order(),['blocked','busy','idle']);
+});
+
+test('blocking editor preserves typed reasons across live updates and permits retry and restore',async()=>{
+ const requests=[];let fail=false;
+ const page=browser({fetch:async(url,options)=>{requests.push({url,...JSON.parse(options.body)});return {ok:!fail,json:async()=>fail?{error:'窗口已离线'}:{blocked:JSON.parse(options.body).blocked}};}});
+ const click=label=>page.all().find(node=>node.tagName==='button'&&node.textContent===label).listeners.click();
+ const dialog=page.nodes.get('block-dialog'),input=page.nodes.get('block-reason'),form=page.nodes.get('block-form'),error=page.nodes.get('block-error');
+ page.send([sampleRow]);click('标记阻塞');assert.equal(dialog.open,true);assert.equal(input.value,'');assert.equal(input.focused,true);
+ const reason='<img src=x onerror=alert(1)> 等待资料';input.value=reason;
+ page.send([{...sampleRow,status:'busy'}]);assert.equal(input.value,reason,'SSE must not overwrite an in-progress edit');
+ await form.listeners.submit({preventDefault(){}});assert.equal(dialog.open,false);
+ assert.deepEqual(requests[0],{url:'/api/block',rowId:sampleRow.id,blocked:true,reason});
+ page.send([{...sampleRow,blocked:true,blockReason:reason}]);assert.equal(page.all().find(node=>node.className==='block-note').textContent,reason,'reason remains literal text');
+ click('编辑原因');assert.equal(input.value,reason);input.value='改为等待回复';fail=true;
+ await form.listeners.submit({preventDefault(){}});assert.equal(dialog.open,true);assert.equal(input.value,'改为等待回复');assert.equal(error.hidden,false);assert.match(error.textContent,/离线/);assert.equal(page.nodes.get('save-block').disabled,false);
+ fail=false;await form.listeners.submit({preventDefault(){}});assert.equal(dialog.open,false);
+ await click('解除阻塞');assert.deepEqual(requests.at(-1),{url:'/api/block',rowId:sampleRow.id,blocked:false,reason:''});
 });

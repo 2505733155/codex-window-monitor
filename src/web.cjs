@@ -2,7 +2,8 @@
 const http=require('node:http');const fs=require('node:fs');const path=require('node:path');
 const {randomBytes,randomUUID,timingSafeEqual}=require('node:crypto');
 const equal=(a,b)=>typeof a==='string'&&Buffer.byteLength(a)===Buffer.byteLength(b)&&timingSafeEqual(Buffer.from(a),Buffer.from(b));
-function windowRequest(req){
+const validWindowRequest=value=>!Object.keys(value).some(key=>!['rowId','choiceId'].includes(key))&&typeof value.rowId==='string'&&value.rowId.length>0&&value.rowId.length<=500&&(value.choiceId===undefined||typeof value.choiceId==='string'&&/^[a-f0-9-]{36}$/.test(value.choiceId));
+function jsonRequest(req,validate=validWindowRequest){
  return new Promise((resolve,reject)=>{
   const chunks=[];let size=0,finished=false;
   const fail=(message,status=400)=>{if(finished)return;finished=true;reject(Object.assign(new Error(message),{status}));};
@@ -11,7 +12,7 @@ function windowRequest(req){
   req.on('end',()=>{
    if(finished)return;
    let value;try{value=JSON.parse(Buffer.concat(chunks).toString('utf8'));}catch{fail('无效的窗口请求');return;}
-   if(!value||typeof value!=='object'||Array.isArray(value)||Object.keys(value).some(key=>!['rowId','choiceId'].includes(key))||typeof value.rowId!=='string'||!value.rowId.length||value.rowId.length>500||value.choiceId!==undefined&&(typeof value.choiceId!=='string'||!/^[a-f0-9-]{36}$/.test(value.choiceId))){fail('无效的窗口请求');return;}
+   if(!value||typeof value!=='object'||Array.isArray(value)||!validate(value)){fail('无效的请求');return;}
    finished=true;resolve(value);
   });
  });
@@ -44,11 +45,23 @@ async function createWeb(state,{port=0,token=randomBytes(32).toString('hex'),ins
   if(!equal(cookie,token)&&!equal(bearer,token)){json(403,{error:'请使用启动入口打开面板'});return;}
   if(req.method==='GET'&&url.pathname==='/health'){json(200,{app:'codex-window-monitor',instanceId});return;}
   if(req.method==='GET'&&url.pathname==='/api/state'){json(200,state.windowSnapshot());return;}
+  if(req.method==='POST'&&url.pathname==='/api/block'){
+   if(stopping){req.resume();json(503,{error:'监控正在停止'});return;}
+   if(req.headers['content-type']?.split(';')[0].trim().toLowerCase()!=='application/json'){req.resume();json(415,{error:'请发送 JSON 阻塞标记'});return;}
+   jsonRequest(req,value=>!Object.keys(value).some(key=>!['rowId','blocked','reason'].includes(key))&&typeof value.rowId==='string'&&value.rowId.length>0&&value.rowId.length<=500&&typeof value.blocked==='boolean'&&(value.reason===undefined||typeof value.reason==='string'&&value.reason.length<=500)).then(value=>{
+    if(stopping||closed)throw Object.assign(new Error('监控正在停止'),{status:503});
+    const result=state.setBlocked(value.rowId,value.blocked,value.reason);
+    if(!res.destroyed&&!res.writableEnded)json(200,result);
+   }).catch(error=>{
+    if(!res.destroyed&&!res.writableEnded)json(error.status||500,{error:error.status?error.message:'修改阻塞标记失败，请重试'});
+   });return;
+  }
   if(req.method==='POST'&&url.pathname==='/api/window'){
+
    if(stopping){req.resume();json(503,{error:'监控正在停止'});return;}
    if(!onWindow){req.resume();json(501,{error:'当前服务不支持窗口跳转'});return;}
    if(req.headers['content-type']?.split(';')[0].trim().toLowerCase()!=='application/json'){req.resume();json(415,{error:'请发送 JSON 窗口请求'});return;}
-   windowRequest(req).then(value=>onWindow(value)).then(value=>{if(!res.destroyed&&!res.writableEnded)json(200,value);}).catch(error=>{
+   jsonRequest(req).then(value=>onWindow(value)).then(value=>{if(!res.destroyed&&!res.writableEnded)json(200,value);}).catch(error=>{
     if(!res.destroyed&&!res.writableEnded)json(Number.isInteger(error.status)&&error.status>=400&&error.status<600?error.status:500,{error:error.status?error.message:'窗口操作失败，请重试'});
    });return;
   }
