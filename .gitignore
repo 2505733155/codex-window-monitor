@@ -1,0 +1,24 @@
+# Local runtime credentials and logs
+.runtime/
+*.log
+
+# Dependencies and generated coverage
+node_modules/
+coverage/
+
+# Local environment files; sanitized examples may be committed
+.env
+.env.*
+!.env.example
+
+# Personal notes and generated planning artifacts
+/prompts/
+/.superpowers/
+/docs/archive/
+/docs/superpowers/
+/docs/progress.md
+
+# Operating system metadata
+.DS_Store
+Thumbs.db
+Desktop.ini

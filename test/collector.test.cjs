@@ -1,0 +1,42 @@
+const {test}=require('node:test');const assert=require('node:assert/strict');const net=require('node:net');const os=require('node:os');const path=require('node:path');const {randomUUID}=require('node:crypto');
+const {Collector}=require('../src/collector.cjs');const {MonitorState}=require('../src/state.cjs');const {encode,FrameDecoder}=require('../src/protocol.cjs');
+function until(emitter,predicate){if(predicate())return Promise.resolve();return new Promise((resolve,reject)=>{const timer=setTimeout(()=>{emitter.off('change',check);reject(new Error('state wait timed out'));},3000);function check(){if(predicate()){clearTimeout(timer);emitter.off('change',check);resolve();}}emitter.on('change',check);});}
+test('real pipe discovery, read-only subscriptions, resync and reconnect',async t=>{
+ const endpoint=process.platform==='win32'?'\\\\.\\pipe\\codex-monitor-test-'+randomUUID():path.join(os.tmpdir(),'codex-'+randomUUID()+'.sock');
+ const sockets=new Set(),sent=[];let connections=0,revision=1,status='idle',autoSnapshot=true,thread='thread',owner='owner';
+ const server=net.createServer(socket=>{sockets.add(socket);socket.on('close',()=>sockets.delete(socket));connections++;
+  const send=m=>socket.write(encode(m));const snapshot=()=>send({type:'broadcast',method:'thread-stream-state-changed',version:11,sourceClientId:owner,params:{hostId:'local',conversationId:thread,change:{type:'snapshot',revision,conversationState:{cwd:'D:\\测试项目',threadRuntimeStatus:{type:status},requests:[]}}}});
+  socket.on('data',chunk=>decoder.push(chunk));const decoder=new FrameDecoder(m=>{sent.push(m);
+   if(m.type==='request'){const result=m.method==='initialize'?{clientId:'observer'}:m.method==='ide-context'?{ideContext:{openTabs:[]}}:{supportsUntrustedAppInput:true};send({type:'response',requestId:m.requestId,method:m.method,resultType:'success',handledByClientId:m.method==='ide-context'?'ide-client':owner,result});
+    if(m.method==='initialize')send({type:'broadcast',method:'thread-stream-following-changed',version:1,sourceClientId:'owner',params:{hostId:'local',conversationId:'thread',following:true}});
+   }
+   if(m.type==='broadcast'&&m.params.following&&autoSnapshot)snapshot();
+  });
+ });
+ await new Promise((resolve,reject)=>{server.once('error',reject);server.listen(endpoint,resolve);});
+ const state=new MonitorState();const collector=new Collector(state,{endpoint,retryMs:20,removeAfterMs:20});
+ t.after(async()=>{collector.stop();for(const socket of sockets)socket.destroy();await new Promise(resolve=>server.close(resolve));});
+ collector.start();await until(state,()=>state.snapshot().rows[0]?.ideClientId==='ide-client');
+ assert.equal(state.snapshot().rows[0].status,'idle');
+ const message=(base,rev,type)=>({type:'broadcast',method:'thread-stream-state-changed',version:11,sourceClientId:'owner',params:{hostId:'local',conversationId:'thread',change:{type:'patches',baseRevision:base,revision:rev,patches:[{op:'replace',path:['threadRuntimeStatus'],value:{type}}]}}});
+ let socket=[...sockets][0];socket.write(encode(message(1,2,'active')));await until(state,()=>state.snapshot().rows[0]?.status==='busy');
+ revision=6;status='idle';socket.write(encode(message(4,5,'idle')));await until(state,()=>state.snapshot().rows[0]?.revision===6);
+ assert.equal(state.snapshot().rows[0].status,'idle');assert.ok(sent.some(m=>m.type==='broadcast'&&m.params.following===false));
+ const disconnected=until(state,()=>state.snapshot().connection==='disconnected');socket.destroy();await disconnected;
+ assert.equal(state.snapshot().rows[0].status,'unknown');
+ await until(state,()=>state.snapshot().connection==='connected'&&state.snapshot().rows[0]?.status==='idle');assert.ok(connections>=2);
+ socket=[...sockets][0];
+ const announce=(source,conversationId,following)=>socket.write(encode({type:'broadcast',method:'thread-stream-following-changed',version:1,sourceClientId:source,params:{hostId:'local',conversationId,following}}));
+ announce('owner','thread',false);await until(state,()=>state.snapshot().rows.length===0);
+ thread='new-thread';announce('owner',thread,true);await until(state,()=>state.snapshot().rows[0]?.threadId==='new-thread');
+ announce('viewer',thread,true);announce('owner',thread,false);
+ await new Promise(resolve=>setImmediate(resolve));assert.equal(state.snapshot().rows.length,1);
+ socket.write(encode({type:'broadcast',method:'client-status-changed',version:0,params:{clientId:'viewer',status:'disconnected'}}));
+ await until(state,()=>state.snapshot().rows.length===0);
+ announce('owner',thread,true);await until(state,()=>state.snapshot().rows.length===1);
+ announce('viewer',thread,true);announce('owner',thread,false);
+ announce('viewer',thread,false);await until(state,()=>state.snapshot().rows.length===0);
+ announce('owner',thread,true);await until(state,()=>state.snapshot().rows[0]?.ownerClientId==='owner');
+ owner='new-owner';announce(owner,thread,true);await until(state,()=>state.snapshot().rows.length===1&&state.snapshot().rows[0].ownerClientId==='new-owner');
+ assert.ok(sent.every(m=>m.type!=='request'||['initialize','thread-owner-discovery','ide-context'].includes(m.method)));
+});
