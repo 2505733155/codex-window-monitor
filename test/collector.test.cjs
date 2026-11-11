@@ -40,3 +40,59 @@ test('real pipe discovery, read-only subscriptions, resync and reconnect',async 
  owner='new-owner';announce(owner,thread,true);await until(state,()=>state.snapshot().rows.length===1&&state.snapshot().rows[0].ownerClientId==='new-owner');
  assert.ok(sent.every(m=>m.type!=='request'||['initialize','thread-owner-discovery','ide-context'].includes(m.method)));
 });
+
+async function reconnectFixture(t){
+ const endpoint=process.platform==='win32'?'\\\\.\\pipe\\codex-reconcile-test-'+randomUUID():path.join(os.tmpdir(),'codex-'+randomUUID()+'.sock');
+ const state=new MonitorState(),sockets=new Set();
+ const fixture={state,announced:['closed','live','slow'],snapshots:new Set(['closed','live','slow']),initialize:true,removeAfterMs:120};
+ const owner=thread=>'owner-'+thread;
+ const server=net.createServer(socket=>{
+  fixture.socket=socket;sockets.add(socket);socket.on('close',()=>sockets.delete(socket));
+  const send=message=>socket.write(encode(message));
+  const announce=thread=>send({type:'broadcast',method:'thread-stream-following-changed',version:1,sourceClientId:owner(thread),params:{hostId:'local',conversationId:thread,following:true}});
+  const decoder=new FrameDecoder(message=>{
+   if(message.type==='request'){
+    const respond=()=>send({type:'response',requestId:message.requestId,method:message.method,resultType:'success',handledByClientId:message.method==='ide-context'?'ide':owner(message.params.conversationId),result:message.method==='initialize'?{clientId:'observer'}:message.method==='ide-context'?{ideContext:{}}:{}});
+    if(message.method==='initialize'){
+     const initialize=()=>{respond();for(const thread of fixture.announced)announce(thread);};
+     if(fixture.initialize)initialize();else fixture.pendingInitialize=initialize;
+    }else respond();
+   }
+   if(message.type==='broadcast'&&message.params.following&&fixture.snapshots.has(message.params.conversationId)){
+    const thread=message.params.conversationId;
+    send({type:'broadcast',method:'thread-stream-state-changed',version:11,sourceClientId:owner(thread),params:{hostId:'local',conversationId:thread,change:{type:'snapshot',revision:1,conversationState:{cwd:'D:\\fixture-'+thread,threadRuntimeStatus:{type:'idle'}}}}});
+   }
+  });socket.on('data',chunk=>decoder.push(chunk));
+ });
+ await new Promise((resolve,reject)=>{server.once('error',reject);server.listen(endpoint,resolve);});
+ const collector=new Collector(state,{endpoint,retryMs:10,removeAfterMs:fixture.removeAfterMs});fixture.collector=collector;
+ t.after(async()=>{collector.stop();for(const socket of sockets)socket.destroy();await new Promise(resolve=>server.close(resolve));});
+ fixture.reconnect=async()=>{const offline=until(state,()=>state.connection==='disconnected');fixture.socket.destroy();await offline;await until(state,()=>state.connection==='connected');};
+ collector.start();await until(state,()=>state.snapshot().rows.length===3);return fixture;
+}
+
+test('reconnect reconciliation removes undiscovered old rows but keeps announced slow sessions',async t=>{
+ const f=await reconnectFixture(t),state=f.state;
+ const live=state.windowSnapshot().rows.find(row=>row.threadId==='live');state.setBlocked(live.id,true,'fixture note');
+ f.announced=['live','slow'];f.snapshots=new Set(['live']);await f.reconnect();
+ assert.equal(state.snapshot().rows.find(row=>row.threadId==='closed').status,'unknown','retain old rows during discovery grace');
+ await until(state,()=>state.snapshot().rows.length===2);
+ assert.deepEqual(state.snapshot().rows.map(row=>row.threadId).sort(),['live','slow']);
+ assert.equal(state.snapshot().rows.find(row=>row.threadId==='slow').status,'unknown','an announcement is enough; slow snapshots must not hide real windows');
+ assert.equal(state.windowSnapshot().rows.find(row=>row.id===live.id).blocked,true);
+ assert.equal(state.windowSnapshot().rows.find(row=>row.id===live.id).blockReason,'fixture note');
+});
+
+test('reconnect reconciliation is cancelled during another disconnect and on stop',async t=>{
+ const f=await reconnectFixture(t),state=f.state;
+ f.announced=[];await f.reconnect();
+ f.initialize=false;const offline=until(state,()=>state.connection==='disconnected');f.socket.destroy();await offline;
+ await new Promise(resolve=>setTimeout(resolve,f.removeAfterMs*2));
+ assert.equal(state.snapshot().rows.length,3,'an uninitialized or disconnected transport cannot prove windows disappeared');
+ assert.ok(state.snapshot().rows.every(row=>row.status==='unknown'));
+ assert.equal(typeof f.pendingInitialize,'function');
+ const online=until(state,()=>state.connection==='connected');f.announced=['live'];f.snapshots=new Set(['live']);f.pendingInitialize();await online;
+ assert.equal(state.snapshot().rows.length,3,'successful reconnection gets a fresh grace period');
+ f.collector.stop();await new Promise(resolve=>setTimeout(resolve,f.removeAfterMs*2));
+ assert.equal(state.snapshot().rows.length,3,'stop must cancel pending reconciliation');
+});

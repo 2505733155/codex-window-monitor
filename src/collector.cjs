@@ -107,6 +107,17 @@ class Collector{
    if(accepted&&message.version===11&&p.change?.type==='snapshot')this.checkMapping(p,message.sourceClientId,p.change.conversationState?.cwd);
   }
  }
+ reconcile(epoch){
+  clearTimeout(this.reconcileTimer);
+  const previousThreads=new Set(this.state.snapshot().rows.map(row=>row.threadId));
+  if(!previousThreads.size)return;
+  this.reconcileTimer=setTimeout(()=>{
+   this.reconcileTimer=null;
+   if(this.stopped||epoch!==this.epoch||this.state.connection!=='connected')return;
+   // Rediscovered sessions may still be waiting for a snapshot; only retire absent ones.
+   for(const threadId of previousThreads)if(!this.followed.has('local:'+threadId))this.state.removeThread(threadId);
+  },this.removeAfterMs);this.reconcileTimer.unref();
+ }
  connect(){
   if(this.stopped)return;
   const epoch=++this.epoch;this.clientId='initializing-client';
@@ -117,7 +128,7 @@ class Collector{
    if(this.stopped||epoch!==this.epoch){socket.destroy();return;}
    this.request('initialize',{clientType:'codex-window-monitor'},0,message=>{
     if(message.resultType!=='success'||typeof message.result?.clientId!=='string'){socket.destroy();return;}
-    clearTimeout(initTimer);this.clientId=message.result.clientId;this.attempt=0;this.state.connected();
+    clearTimeout(initTimer);this.clientId=message.result.clientId;this.attempt=0;this.state.connected();this.reconcile(epoch);
    });
   });
   socket.on('data',chunk=>{try{decoder.push(chunk);}catch{this.state.disconnected('状态通信数据无效，正在重连');socket.destroy();}});
@@ -131,6 +142,7 @@ class Collector{
   });
  }
  clearTransient(){
+  clearTimeout(this.reconcileTimer);this.reconcileTimer=null;
   for(const {timer}of this.pending.values())clearTimeout(timer);this.pending.clear();
   for(const timer of this.removals.values())clearTimeout(timer);this.removals.clear();
   for(const timer of this.resyncs.values())clearTimeout(timer);this.resyncs.clear();
