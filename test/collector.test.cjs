@@ -56,7 +56,7 @@ async function reconnectFixture(t){
     if(message.method==='initialize'){
      const initialize=()=>{respond();for(const thread of fixture.announced)announce(thread);};
      if(fixture.initialize)initialize();else fixture.pendingInitialize=initialize;
-    }else respond();
+    }else if(message.method==='ide-context'&&fixture.onIdeContext)fixture.onIdeContext(message,respond);else respond();
    }
    if(message.type==='broadcast'&&message.params.following&&fixture.snapshots.has(message.params.conversationId)){
     const thread=message.params.conversationId;
@@ -95,4 +95,17 @@ test('reconnect reconciliation is cancelled during another disconnect and on sto
  assert.equal(state.snapshot().rows.length,3,'successful reconnection gets a fresh grace period');
  f.collector.stop();await new Promise(resolve=>setTimeout(resolve,f.removeAfterMs*2));
  assert.equal(state.snapshot().rows.length,3,'stop must cancel pending reconciliation');
+});
+
+test('workspace mapping rechecks cwd patches and ignores superseded IDE query responses',{timeout:5000},async t=>{
+ const f=await reconnectFixture(t),state=f.state;await until(state,()=>state.snapshot().rows.every(row=>row.ideClientId==='ide'));
+ let receive;f.onIdeContext=(message,respond)=>receive({message,respond});
+ const expectRequest=()=>new Promise((resolve,reject)=>{const timer=setTimeout(()=>reject(new Error('new workspace was not checked')),1000);receive=value=>{clearTimeout(timer);resolve(value);};});
+ const move=(base,revision,cwd)=>f.socket.write(encode({type:'broadcast',method:'thread-stream-state-changed',version:11,sourceClientId:'owner-live',params:{hostId:'local',conversationId:'live',change:{type:'patches',baseRevision:base,revision,patches:[{op:'replace',path:['cwd'],value:cwd}]}}}));
+ const first=expectRequest();move(1,2,'D:/fixture-renamed');const oldQuery=await first;assert.equal(oldQuery.message.params.workspaceRoot,'D:/fixture-renamed');
+ const next=expectRequest();move(2,3,'D:/fixture-newest');const currentQuery=await next;assert.equal(currentQuery.message.params.workspaceRoot,'D:/fixture-newest');
+ oldQuery.respond();for(let n=0;n<100&&f.collector.pending.has(oldQuery.message.requestId);n++)await new Promise(resolve=>setTimeout(resolve,5));
+ assert.equal(f.collector.pending.has(oldQuery.message.requestId),false);assert.equal(state.snapshot().rows.find(row=>row.threadId==='live').ideClientId,null,'late results cannot verify the new directory');
+ currentQuery.respond();await until(state,()=>state.snapshot().rows.find(row=>row.threadId==='live').ideClientId==='ide');
+ assert.equal(state.windowSnapshot().rows.find(row=>row.ownerClientId==='owner-live').name,'fixture-newest');
 });

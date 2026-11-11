@@ -1,6 +1,12 @@
 'use strict';
 const {EventEmitter}=require('node:events');
 const path=require('node:path');
+function normalizeDirectory(cwd){
+ if(!cwd)return '';
+ let value=path.win32.normalize(cwd);const root=path.win32.parse(value).root;
+ while(value.length>root.length&&value.endsWith(path.win32.sep))value=value.slice(0,-1);
+ return value.toLowerCase();
+}
 function runtime(value){
  if(!value||typeof value.type!=='string')return null;
  return {type:value.type,activeFlags:Array.isArray(value.activeFlags)?value.activeFlags.filter(v=>typeof v==='string').slice(0,20):[]};
@@ -29,9 +35,15 @@ class MonitorState extends EventEmitter{
  clientGone(clientId){for(const row of this.rows.values())if(row.ownerClientId===clientId){row.synced=false;this.unknown(row,'Codex 面板已断开');}this.changed();}
  removeClient(clientId){for(const [id,row]of this.rows)if(row.ownerClientId===clientId)this.rows.delete(id);this.changed();}
  removeThread(threadId,exceptOwner){for(const [id,row]of this.rows)if(row.threadId===threadId&&row.ownerClientId!==exceptOwner)this.rows.delete(id);this.changed();}
- setMapping(ownerId,threadId,ideClientId){
-  for(const row of this.rows.values())if(row.ownerClientId===ownerId&&row.threadId===threadId){row.ideClientId=ideClientId||null;}
-  this.changed();
+ setDirectory(row,cwd){
+  const next=typeof cwd==='string'?cwd.slice(0,4096):'';
+  if(normalizeDirectory(row.cwd)!==normalizeDirectory(next))row.ideClientId=null;
+  row.cwd=next;row.name=next?path.win32.basename(next)||next:'未识别项目';
+ }
+ setMapping(ownerId,threadId,ideClientId,cwd){
+  let changed=false;
+  for(const row of this.rows.values())if(row.ownerClientId===ownerId&&row.threadId===threadId&&(cwd===undefined||normalizeDirectory(row.cwd)===normalizeDirectory(cwd))){row.ideClientId=ideClientId||null;changed=true;}
+  if(changed)this.changed();
  }
  setBlocked(rowId,blocked,reason=''){
   if(typeof rowId!=='string'||!rowId.length||rowId.length>500||typeof blocked!=='boolean'||typeof reason!=='string'||reason.length>500)throw Object.assign(new Error('无效的阻塞标记或原因过长（最多 500 字）'),{status:400});
@@ -60,8 +72,8 @@ class MonitorState extends EventEmitter{
    if(!Number.isSafeInteger(c.revision)||c.revision<0||!c.conversationState||typeof c.conversationState!=='object')return invalidate('无效的会话快照');
    if(c.revision<row.minimumRevision||row.revision!==null&&c.revision<row.revision)return false;
    const s=c.conversationState;row.raw=runtime(s.threadRuntimeStatus);
-   row.cwd=typeof s.cwd==='string'?s.cwd.slice(0,4096):'';
-   row.name=row.cwd?path.win32.basename(row.cwd.replace(/[\\/]+$/,''))||row.cwd:'未识别项目';
+   this.setDirectory(row,s.cwd);
+
    row.revision=c.revision;row.minimumRevision=c.revision;row.synced=true;
   }else if(c.type==='patches'){
    if(!row.synced){if(Number.isSafeInteger(c.revision)&&c.revision>=0)row.minimumRevision=Math.max(row.minimumRevision,c.revision);return false;}
@@ -74,7 +86,7 @@ class MonitorState extends EventEmitter{
     const at=Array.isArray(patch.path)?patch.path:typeof patch.path==='string'?patch.path.split('/').filter(Boolean):[];
     if(at.length===0){
      if(patch.op==='remove'||!patch.value||typeof patch.value!=='object')return invalidate('会话状态被移除，正在重新同步');
-     row.raw=runtime(patch.value.threadRuntimeStatus);row.cwd=typeof patch.value.cwd==='string'?patch.value.cwd.slice(0,4096):'';row.name=row.cwd?path.win32.basename(row.cwd):'未识别项目';continue;
+     row.raw=runtime(patch.value.threadRuntimeStatus);this.setDirectory(row,patch.value.cwd);continue;
     }
     if(at[0]==='threadRuntimeStatus'){
      if(at.length===1)row.raw=patch.op==='remove'?null:runtime(patch.value);
@@ -85,7 +97,7 @@ class MonitorState extends EventEmitter{
       else{const index=Number(at[2]);if(at.length!==3||!Number.isSafeInteger(index)||index<0||index>20||patch.op!=='remove'&&typeof patch.value!=='string')return invalidate('无效的等待状态增量');const flags=row.raw.activeFlags||=[];if(patch.op==='remove')flags.splice(index,1);else if(patch.op==='add')flags.splice(index,0,patch.value);else flags[index]=patch.value;}
      }else return invalidate('未知状态字段变更');
     }
-    if(at.length===1&&at[0]==='cwd'&&typeof patch.value==='string'){row.cwd=patch.value.slice(0,4096);row.name=path.win32.basename(row.cwd);}
+    if(at.length===1&&at[0]==='cwd'&&typeof patch.value==='string')this.setDirectory(row,patch.value);
    }
    row.revision=c.revision;row.minimumRevision=c.revision;
   }else return;
@@ -100,12 +112,17 @@ class MonitorState extends EventEmitter{
    const id='window:'+row.ownerClientId+':'+row.hostId;
    if(!groups.has(id))groups.set(id,[]);groups.get(id).push(row);
   }
-  const rows=[];
+  const rows=[];const directory=row=>normalizeDirectory(row.cwd);
   for(const [id,members]of groups){
    const counts={busy:0,attention:0,unknown:0,idle:0};for(const row of members)counts[row.status]++;
    const status=['busy','attention','unknown','idle'].find(value=>counts[value]>0)||'unknown';
    const candidates=members.filter(row=>row.status===status).sort((a,b)=>(b.lastSeen||0)-(a.lastSeen||0)||a.id.localeCompare(b.id));
    const representative=candidates[0]||members[0];
+   // Project identity is independent of whichever session currently drives the status.
+   const projects=members.filter(row=>row.cwd),verified=projects.filter(row=>row.ideClientId);
+   const identityCandidates=verified.length?verified:projects;
+   const projectAmbiguous=new Set(identityCandidates.map(directory)).size>1;
+   const project=projectAmbiguous?null:identityCandidates.sort((a,b)=>a.id.localeCompare(b.id))[0]||representative;
    let timing=this.windowTimings.get(id);
    const sameMembers=timing&&timing.members.size===members.length&&members.every(row=>timing.members.has(row.id));
    if(!timing)timing={status,since:Math.min(...candidates.map(row=>row.since)),sinceKnown:false};
@@ -116,14 +133,14 @@ class MonitorState extends EventEmitter{
    const labels={busy:'执行中',attention:'待处理',unknown:'未知',idle:'空闲'};
    const reason=members.length===1?representative.reason:members.length+' 个会话：'+Object.keys(counts).filter(key=>counts[key]).map(key=>counts[key]+' '+labels[key]).join('，');
    const sessions=members.map(row=>({id:row.id,threadId:row.threadId,cwd:row.cwd,name:row.name,status:row.status,reason:row.reason,since:row.since,sinceKnown:row.sinceKnown,lastSeen:row.lastSeen}));
-   const ideClientId=representative.ideClientId||members.find(row=>row.cwd.toLowerCase()===representative.cwd.toLowerCase()&&row.ideClientId)?.ideClientId||null;
-   rows.push({...representative,id,blocked:this.windowBlocks.has(id),blockReason:this.windowBlocks.get(id)||'',status,reason,since:timing.since,sinceKnown:timing.sinceKnown,ideClientId,lastSeen:Math.max(...members.map(row=>row.lastSeen||0))||null,sessionCount:sessions.length,sessions});
+   const ideClientId=project?.ideClientId||null;
+   rows.push({...representative,id,name:project?.name||'多项目窗口',cwd:project?.cwd||'',projectAmbiguous,blocked:this.windowBlocks.has(id),blockReason:this.windowBlocks.get(id)||'',status,reason,since:timing.since,sinceKnown:timing.sinceKnown,ideClientId,lastSeen:Math.max(...members.map(row=>row.lastSeen||0))||null,sessionCount:sessions.length,sessions});
   }
   for(const id of this.windowTimings.keys())if(!groups.has(id))this.windowTimings.delete(id);
   for(const id of this.windowBlocks.keys())if(!groups.has(id))this.windowBlocks.delete(id);
-  const counts=new Map();const directory=row=>row.cwd?path.win32.normalize(row.cwd).toLowerCase():'';
+  const counts=new Map();
   for(const row of rows){const key=directory(row);if(key)counts.set(key,(counts.get(key)||0)+1);}
-  for(const row of rows)row.mapping=counts.get(directory(row))>1?'ambiguous':row.ideClientId?'project-match':'unconfirmed';
+  for(const row of rows)row.mapping=row.projectAmbiguous||counts.get(directory(row))>1?'ambiguous':row.ideClientId?'project-match':'unconfirmed';
   return {...snapshot,sessionCount:snapshot.rows.length,rows};
  }
  snapshot(){
@@ -132,4 +149,4 @@ class MonitorState extends EventEmitter{
    rows:[...this.rows.values()].map(row=>{const {raw,synced,minimumRevision,...safe}=row;return {...safe,mapping:counts.get(row.cwd.toLowerCase())>1?'ambiguous':row.ideClientId?'project-match':'unconfirmed'};})};
  }
 }
-module.exports={MonitorState,classify};
+module.exports={MonitorState,classify,normalizeDirectory};

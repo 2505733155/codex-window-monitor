@@ -1,10 +1,11 @@
 'use strict';
 const net=require('node:net');const {randomUUID}=require('node:crypto');
 const {encode,FrameDecoder,validateOutbound}=require('./protocol.cjs');
+const {normalizeDirectory}=require('./state.cjs');
 class Collector{
  constructor(state,{endpoint='\\\\.\\pipe\\codex-ipc',retryMs=500,removeAfterMs=10000}={}){
   this.state=state;this.endpoint=endpoint;this.retryMs=retryMs;this.removeAfterMs=removeAfterMs;
-  this.pending=new Map();this.followed=new Map();this.checked=new Set();this.removals=new Map();this.resyncs=new Map();
+  this.pending=new Map();this.followed=new Map();this.checked=new Map();this.removals=new Map();this.resyncs=new Map();
   this.announcers=new Map();this.owners=new Map();this.ownerQueries=new Map();
   this.clientId='initializing-client';this.stopped=true;this.epoch=0;this.attempt=0;
   this.onResync=record=>this.resync(record);state.on('resync',this.onResync);
@@ -42,14 +43,19 @@ class Collector{
   const key='local:'+p.conversationId;
   if(this.followed.has(key))this.following(p,false);
   this.followed.delete(key);this.announcers.delete(key);this.owners.delete(key);this.ownerQueries.delete(key);
-  for(const name of this.checked)if(name.endsWith(':'+p.conversationId))this.checked.delete(name);
+  for(const name of this.checked.keys())if(name.endsWith(':'+p.conversationId))this.checked.delete(name);
   for(const [name,timer]of this.resyncs)if(name.endsWith(':'+p.conversationId)){clearTimeout(timer);this.resyncs.delete(name);}
   if(removeRows)this.state.removeThread(p.conversationId);
  }
  checkMapping(p,owner,cwd){
-  const key=owner+':'+p.conversationId;if(!cwd||this.checked.has(key))return;this.checked.add(key);
+  const key=owner+':'+p.conversationId,directory=normalizeDirectory(cwd);
+  if(!directory||this.checked.get(key)?.directory===directory)return;
+  const query={directory};this.checked.set(key,query);
   this.request('ide-context',{workspaceRoot:cwd},0,message=>{
-   if(message.resultType==='success'&&Object.hasOwn(message.result||{},'ideContext'))this.state.setMapping(owner,p.conversationId,message.handledByClientId);
+   if(this.checked.get(key)!==query)return;
+   const row=this.state.snapshot().rows.find(value=>value.ownerClientId===owner&&value.threadId===p.conversationId);
+   if(!row||normalizeDirectory(row.cwd)!==directory){this.checked.delete(key);return;}
+   if(message.resultType==='success'&&Object.hasOwn(message.result||{},'ideContext'))this.state.setMapping(owner,p.conversationId,message.handledByClientId,cwd);
    else this.checked.delete(key);
   });
  }
@@ -104,7 +110,10 @@ class Collector{
     const resyncKey=message.sourceClientId+':'+p.conversationId;clearTimeout(this.resyncs.get(resyncKey));this.resyncs.delete(resyncKey);
     clearTimeout(this.removals.get(message.sourceClientId));this.removals.delete(message.sourceClientId);
    }
-   if(accepted&&message.version===11&&p.change?.type==='snapshot')this.checkMapping(p,message.sourceClientId,p.change.conversationState?.cwd);
+   if(accepted&&message.version===11){
+    const row=this.state.snapshot().rows.find(value=>value.ownerClientId===message.sourceClientId&&value.threadId===p.conversationId);
+    if(row)this.checkMapping(p,message.sourceClientId,row.cwd);
+   }
   }
  }
  reconcile(epoch){

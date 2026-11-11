@@ -19,7 +19,7 @@ function duration(row,precise=false){
 function save(){try{localStorage.setItem('codex-filter',filter);localStorage.setItem('codex-search',$('search').value);localStorage.setItem('codex-idle-first',$('idle-first').checked);}catch{}}
 function render(){
  const rows=snapshot.rows.map(effective);const query=$('search').value.trim().toLowerCase();
- let visible=rows.filter(row=>(filter==='all'||row.status===filter||filter==='other'&&!['idle','busy'].includes(row.status))&&(row.name+' '+row.cwd).toLowerCase().includes(query));
+ let visible=rows.filter(row=>(filter==='all'||row.status===filter||filter==='other'&&!['idle','busy'].includes(row.status))&&[row,...(row.sessions||[])].some(value=>((value.name||'')+' '+(value.cwd||'')).toLowerCase().includes(query)));
  visible.sort((a,b)=>Number(!!a.blocked)-Number(!!b.blocked)||($('idle-first').checked?(a.status==='idle'?0:1)-(b.status==='idle'?0:1)||a.name.localeCompare(b.name):0));
  const counts={all:rows.length,idle:0,busy:0,other:0};for(const row of rows)counts[['idle','busy'].includes(row.status)?row.status:'other']++;
  for(const key of Object.keys(counts))$('count-'+key).textContent=counts[key];
@@ -32,7 +32,7 @@ function render(){
   if(row.mapping==='ambiguous')name.append(element('span','short-id',row.ownerClientId.slice(0,6)));
   if(row.sessionCount>1)name.append(element('span','session-count',row.sessionCount+' 个会话'));
   if(row.blocked)name.append(element('span','block-tag','已阻塞'));
-  const directory=element('div','project-path',row.cwd||'目录待识别');directory.title=row.cwd;info.append(name,directory);
+  const directory=element('div','project-path',row.cwd||(row.projectAmbiguous?'项目目录待确认，见详情':'目录待识别'));directory.title=row.cwd;info.append(name,directory);
   if(row.blocked){const note=element('div','block-note',row.blockReason||'未填写阻塞原因');note.title=row.blockReason||'未填写阻塞原因';info.append(note);}
   project.append(folder,info);projectCell.append(project);
   const statusCell=element('td'),badge=element('span','badge '+row.status),dot=element('i','dot');badge.append(dot,document.createTextNode(labels[row.status]||'未知'));statusCell.append(badge,element('div','state-note',row.reason));
@@ -54,7 +54,7 @@ function render(){
 function renderDetail(){
  const original=snapshot.rows.find(row=>row.id===selectedId);if(!original){$('detail').close();return;}const row=effective(original);
  $('detail-title').textContent=row.name;$('detail-fields').replaceChildren();
- const fields=[['项目目录',row.cwd||'待识别'],['Codex 状态',(labels[row.status]||'未知')+' · '+row.reason],['状态持续',duration(row,true)],['窗口对应',row.mapping==='project-match'?'已按项目目录核对':row.mapping==='ambiguous'?'同目录存在多个窗口，实际归属待确认':'窗口归属待确认'],['最后确认',row.lastSeen?new Date(row.lastSeen).toLocaleString():'尚未确认'],['窗口标识',row.ownerClientId.slice(0,8)],['会话数量',String(row.sessionCount||1)]];
+ const fields=[['项目目录',row.cwd||'待识别'],['Codex 状态',(labels[row.status]||'未知')+' · '+row.reason],['状态持续',duration(row,true)],['窗口对应',row.mapping==='project-match'?'已按项目目录核对':row.mapping==='ambiguous'?'存在多个可能对应的项目或窗口，实际归属待确认':'窗口归属待确认'],['最后确认',row.lastSeen?new Date(row.lastSeen).toLocaleString():'尚未确认'],['窗口标识',row.ownerClientId.slice(0,8)],['会话数量',String(row.sessionCount||1)]];
  if(row.blocked)fields.splice(2,0,['阻塞原因',row.blockReason||'未填写原因']);
  for(const [title,value]of fields){const dd=element('dd',null,value);if(title==='状态持续')dd.id='detail-duration';$('detail-fields').append(element('dt',null,title),dd);}
  const list=$('detail-sessions');if(list){

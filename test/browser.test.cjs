@@ -101,3 +101,10 @@ test('blocking editor preserves typed reasons across live updates and permits re
  fail=false;await form.listeners.submit({preventDefault(){}});assert.equal(dialog.open,false);
  await click('解除阻塞');assert.deepEqual(requests.at(-1),{url:'/api/block',rowId:sampleRow.id,blocked:false,reason:''});
 });
+
+test('ambiguous windows remain searchable by every member project name and directory',()=>{
+ const page=browser();const row={...sampleRow,name:'多项目窗口',cwd:'',projectAmbiguous:true,mapping:'ambiguous',sessions:[{...sampleRow,name:'fixture-current',cwd:'D:/fixture-current'},{...sampleRow,id:'history',name:'fixture-history',cwd:'D:/fixture-history'}]};
+ page.send([row]);
+ for(const query of ['fixture-current','d:/fixture-history']){page.nodes.get('search').value=query;page.nodes.get('search').listeners.input();assert.ok(page.all().some(node=>node.dataset?.duration===row.id),query);}
+ page.nodes.get('search').value='no-such-project';page.nodes.get('search').listeners.input();assert.ok(!page.all().some(node=>node.dataset?.duration===row.id));
+});

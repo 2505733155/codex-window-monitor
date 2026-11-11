@@ -93,3 +93,57 @@ test('manual blocking validates input and is forgotten when the window is remove
  state.setBlocked(id,true,'暂缓');state.disconnected();assert.equal(state.windowSnapshot().rows[0].blocked,true);
  state.removeClient('owner');state.ingest(snap());assert.equal(state.windowSnapshot().rows[0].blocked,false);
 });
+
+function projectSession(thread,cwd,type='idle',revision=1,owner='owner'){
+ const message=snap(owner,{type},revision);message.params.conversationId=thread;message.params.change.conversationState.cwd=cwd;return message;
+}
+
+test('window identity prefers the verified workspace independently of session status and recency',()=>{
+ let now=1000;const state=new MonitorState({clock:()=>now});state.connected();
+ state.ingest(projectSession('current','D:/fixture-current'));state.setMapping('owner','current','ide-current');
+ const id=state.windowSnapshot().rows[0].id;state.setBlocked(id,true,'fixture note');
+ now=5000;state.ingest(projectSession('history','D:/fixture-history','active'));
+ let row=state.windowSnapshot().rows[0];
+ assert.equal(row.name,'fixture-current');assert.equal(row.cwd,'D:/fixture-current');assert.equal(row.ideClientId,'ide-current');assert.equal(row.mapping,'project-match');
+ assert.equal(row.status,'busy');assert.equal(row.sessionCount,2);assert.equal(row.lastSeen,5000);assert.equal(row.blocked,true);assert.equal(row.blockReason,'fixture note');
+ assert.deepEqual(row.sessions.map(value=>value.cwd).sort(),['D:/fixture-current','D:/fixture-history']);
+ now=9000;state.ingest(projectSession('history','D:/fixture-history','idle',2));row=state.windowSnapshot().rows[0];
+ assert.equal(row.name,'fixture-current');assert.equal(row.status,'idle');assert.equal(row.id,id);
+ assert.equal(state.snapshot().rows.find(value=>value.threadId==='history').name,'fixture-history','raw collector state remains per-session');
+});
+
+test('window identity exposes conflicting project directories instead of guessing from the latest session',()=>{
+ const state=new MonitorState();state.connected();state.ingest(projectSession('first','D:/fixture-first'));state.ingest(projectSession('second','D:/fixture-second','active'));
+ let row=state.windowSnapshot().rows[0];assert.equal(row.name,'多项目窗口');assert.equal(row.cwd,'');assert.equal(row.mapping,'ambiguous');assert.equal(row.status,'busy');
+ state.setMapping('owner','first','ide-first');assert.equal(state.windowSnapshot().rows[0].name,'fixture-first');
+ state.setMapping('owner','second','ide-second');row=state.windowSnapshot().rows[0];
+ assert.equal(row.name,'多项目窗口');assert.equal(row.cwd,'');assert.equal(row.ideClientId,null);assert.equal(row.mapping,'ambiguous');assert.equal(row.sessionCount,2);
+});
+
+test('window identity normalizes verified directories and detects duplicate windows after identity selection',()=>{
+ const state=new MonitorState();state.connected();state.ingest(projectSession('current','D:/Fixture-Current'));state.setMapping('owner','current','ide-current');
+ const same=projectSession('same','d:/fixture-current/');state.ingest(same);state.setMapping('owner','same','ide-current');
+ state.ingest(projectSession('history','D:/fixture-history','active'));let row=state.windowSnapshot().rows[0];
+ assert.equal(row.name,'Fixture-Current');assert.equal(row.mapping,'project-match');assert.equal(row.sessionCount,3);
+ state.ingest(projectSession('other','d:/fixture-current','idle',1,'another-owner'));
+ const rows=state.windowSnapshot().rows;assert.equal(rows.length,2);assert.ok(rows.every(value=>value.mapping==='ambiguous'),'directory ambiguity uses the selected display identity');
+});
+
+test('workspace mapping expires on directory changes and rejects late results for old directories',()=>{
+ const state=new MonitorState();state.connected();state.ingest(projectSession('moving','D:/fixture-a'));state.setMapping('owner','moving','ide-a');
+ state.ingest(projectSession('moving','D:/fixture-b','idle',2));assert.equal(state.snapshot().rows[0].ideClientId,null);
+ state.setMapping('owner','moving','late-ide-a','D:/fixture-a');assert.equal(state.snapshot().rows[0].ideClientId,null);
+ state.setMapping('owner','moving','ide-b','D:/fixture-b');
+ const update=projectSession('moving','D:/fixture-b','idle',3);update.params.change={type:'patches',baseRevision:2,revision:3,patches:[{op:'replace',path:['cwd'],value:'D:/fixture-c'}]};state.ingest(update);
+ assert.equal(state.snapshot().rows[0].ideClientId,null);
+ state.setMapping('owner','moving','ide-c','D:/fixture-c');update.params.change={type:'patches',baseRevision:3,revision:4,patches:[{op:'replace',path:[],value:{cwd:'D:/fixture-d',threadRuntimeStatus:{type:'idle'}}}]};state.ingest(update);
+ assert.equal(state.snapshot().rows[0].ideClientId,null);
+});
+
+test('window identity preserves drive roots while normalizing equivalent directories',()=>{
+ const state=new MonitorState();state.connected();state.ingest(projectSession('root-a','D:/'));state.setMapping('owner','root-a','ide-root');
+ state.ingest(projectSession('root-b','D:'+String.fromCharCode(92)));state.setMapping('owner','root-b','ide-root');
+ let row=state.windowSnapshot().rows[0];assert.equal(row.mapping,'project-match');assert.ok(row.cwd);assert.equal(row.projectAmbiguous,false);
+ state.ingest(projectSession('another-root','d:/','idle',1,'another-owner'));
+ assert.ok(state.windowSnapshot().rows.every(value=>value.mapping==='ambiguous'));
+});
