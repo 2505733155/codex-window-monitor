@@ -2,13 +2,14 @@
 const {test}=require('node:test');
 const assert=require('node:assert/strict');
 const {MonitorState}=require('../src/state.cjs');
+const {InputState}=require('../src/input-state.cjs');
 const question={type:'agentMessage',id:'call_test',delivery:'async',questions:[{title:'SECRET QUESTION',options:[]},{title:'SECOND SECRET'}]};
 const qid='["request_user_input_async","call_test",0]';
 const reply=(status='accepted',ids=[qid])=>({type:'steeringUserMessage',status,input:[{type:'text',text:'<send_user_message_question_reply>\n'+JSON.stringify(ids.map(questionItemId=>({questionItemId,question:'SECRET QUESTION',answer:''})))+'\n</send_user_message_question_reply>'}]});
 function harness(items=[question],complete=true){
  const state=new MonitorState();state.connected();let revision=1;
  const send=change=>state.ingest({type:'broadcast',method:'thread-stream-state-changed',version:11,sourceClientId:'owner',params:{hostId:'local',conversationId:'thread',change}});
- const snapshot=(values=items,isComplete=complete)=>send({type:'snapshot',revision:revision++,conversationState:{cwd:'D:/fixture',threadRuntimeStatus:{type:'active',activeFlags:[]},turnHistory:{kind:'canonical',history:{isComplete,entitiesByKey:{'tail/0':{items:values}}}}}});
+ const snapshot=(values=items,isComplete=complete)=>send({type:'snapshot',revision:revision++,conversationState:{cwd:'D:/fixture',threadRuntimeStatus:{type:'active',activeFlags:[]},turnHistory:{kind:'canonical',history:{isComplete,entitiesByKey:{'tail/0':{rootTurnId:'root-fixture',items:values}},islands:[{entries:[{key:'tail/0'}],newerBoundary:{status:'exhausted'}}]}}}});
  snapshot();
  return {state,snapshot,row:()=>state.windowSnapshot().rows[0],patch:(path,value,op='replace')=>send({type:'patches',baseRevision:revision-1,revision:revision++,patches:[{op,path,value}]})};
 }
@@ -58,7 +59,7 @@ test('oversized question arrays are unconfirmed and root replacement clears stal
 });
 test('pending counts aggregate by owner and host while revision gaps invalidate their own session',()=>{
  const h=harness();
- const conversationState={cwd:'D:/other',threadRuntimeStatus:{type:'idle'},turnHistory:{kind:'canonical',history:{isComplete:true,entitiesByKey:{turn:{items:[{...question,id:'second-call'}]}}}}};
+ const conversationState={cwd:'D:/other',threadRuntimeStatus:{type:'idle'},turnHistory:{kind:'canonical',history:{isComplete:true,entitiesByKey:{turn:{rootTurnId:'second-root',items:[{...question,id:'second-call'}]}},islands:[{entries:[{key:'turn'}],newerBoundary:{status:'exhausted'}}]}}};
  const second={type:'broadcast',method:'thread-stream-state-changed',version:11,sourceClientId:'owner',params:{hostId:'local',conversationId:'second',change:{type:'snapshot',revision:1,conversationState}}};
  h.state.ingest(second);assert.equal(h.row().sessionCount,2);assert.equal(h.row().pendingInputCount,4);assert.equal(h.row().status,'busy');
  h.state.ingest({...second,sourceClientId:'separate'});assert.equal(h.state.windowSnapshot().rows.length,2);
@@ -101,4 +102,44 @@ test('accepted steering replies retain the content fallback in snapshots and pat
  h.patch(['turnHistory','history','entitiesByKey','tail/0','items',1,'content'],reply('accepted',['["request_user_input_async","call_test",1]']).input);
  assert.equal(h.row().pendingInputCount,1);
  h.patch(['turnHistory','history','entitiesByKey','tail/0','items',2],message,'add');assert.equal(h.row().pendingInputCount,0);
+});
+
+function scopedState(entities,order=Object.keys(entities),complete=true){
+ return {turnHistory:{kind:'canonical',history:{isComplete:complete,entitiesByKey:entities,islands:[{entries:order.map(key=>({key,value:key})),newerBoundary:{status:'exhausted'}}]}}};
+}
+test('only the current interaction counts; restored historical IDs cannot accumulate as pending',()=>{
+ const p=new InputState();
+ p.snapshot(scopedState({current:{rootTurnId:'current',params:{input:[{type:'text',text:'NEW TASK'}]},items:[]},old:{rootTurnId:'old',items:[{...question,id:'item-25'},reply()]},previous:{rootTurnId:'previous',params:{input:[{type:'text',text:'PREVIOUS TASK'}]},items:[{...question,id:'item-100'}]}},['old','previous','current']));
+ assert.deepEqual(p.summary(),{pendingInputCount:0,inputSync:'complete'});
+ p.patch(['turnHistory','history','entitiesByKey','current','items','-'],'add',question);assert.equal(p.summary().pendingInputCount,2);
+ p.patch(['turnHistory','history','entitiesByKey','current','items','-'],'add',reply());assert.equal(p.summary().pendingInputCount,1);
+});
+test('automatic continuations and reply-only new roots preserve remaining questions across turns',()=>{
+ const p=new InputState(),first={rootTurnId:'original',items:[question]},continued={rootTurnId:'original',items:[]};
+ const answered={rootTurnId:'reply-root',params:{input:reply().input},items:[{...reply(),type:'userMessage',content:reply().input}]};
+ p.snapshot(scopedState({first,continued,answered},['first','continued','answered']));assert.equal(p.summary().pendingInputCount,1);
+ p.patch(['turnHistory','history','entitiesByKey','answered','items','-'],'add',reply('accepted',['["request_user_input_async","call_test",1]']));assert.equal(p.summary().pendingInputCount,0);
+});
+test('ordered index patches change interaction scope and match an equivalent snapshot',()=>{
+ const p=new InputState(),first={rootTurnId:'old',items:[question]},next={rootTurnId:'new',params:{input:[{type:'text',text:'NEW TASK'}]},items:[]};
+ p.snapshot(scopedState({first}));assert.equal(p.summary().pendingInputCount,2);
+ p.patch(['turnHistory','history','entitiesByKey','next'],'add',next);assert.equal(p.summary().pendingInputCount,2);
+ p.patch(['turnHistory','history','islands',0,'entries','-'],'add',{key:'next'});assert.equal(p.summary().pendingInputCount,0);
+ const equivalent=new InputState();equivalent.snapshot(scopedState({next,first},['first','next']));assert.deepEqual(p.summary(),equivalent.summary());
+ p.patch(['turnHistory','history','islands',0,'entries',1],'remove');assert.equal(p.summary().pendingInputCount,2);
+});
+test('missing current-tail metadata cannot claim a confirmed pending count',()=>{
+ const p=new InputState();const s=scopedState({old:{rootTurnId:'old',items:[question]}});
+ delete s.turnHistory.history.islands;p.snapshot(s);assert.equal(p.summary().inputSync,'unknown');assert.equal(p.summary().pendingInputCount,0);
+ s.turnHistory.history.islands=[{entries:[{key:'old'}],newerBoundary:{status:'gap'}}];p.snapshot(s);assert.equal(p.summary().inputSync,'unknown');
+});
+test('new root with missing input evidence stays unconfirmed until its scope can be classified',()=>{
+ const p=new InputState(),first={rootTurnId:'original',items:[question]},next={rootTurnId:'new',items:[]};
+ p.snapshot(scopedState({first,next}));assert.equal(p.summary().inputSync,'unknown');
+ p.patch(['turnHistory','history','entitiesByKey','next','params'],'add',{input:reply().input});assert.equal(p.summary().pendingInputCount,2);assert.equal(p.summary().inputSync,'complete');
+ p.patch(['turnHistory','history','entitiesByKey','next','params','input'],'replace',[{type:'text',text:'NEW TASK'}]);assert.equal(p.summary().pendingInputCount,0);assert.equal(p.summary().inputSync,'complete');
+});
+test('confirmed new request supersedes uncertainty in older interaction boundaries',()=>{
+ const p=new InputState();p.snapshot(scopedState({first:{rootTurnId:'old',items:[question]},incomplete:{rootTurnId:'incomplete',items:[]},current:{rootTurnId:'current',params:{input:[{type:'text',text:'NEW TASK'}]},items:[]}}));
+ assert.deepEqual(p.summary(),{pendingInputCount:0,inputSync:'complete'});
 });

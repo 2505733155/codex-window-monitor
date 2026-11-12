@@ -2,8 +2,9 @@
 // A bounded projection of canonical history. Text is decoded immediately into
 // reply IDs; question bodies, chat, tool arguments and output never enter it.
 const LIMIT=30000,ARRAY_LIMIT=10000;
+const inputSchema=[{type:'type',text:'reply'}];
 const itemSchema={type:'type',id:'id',delivery:'delivery',questions:['question'],status:'status',steerAcknowledged:'boolean',input:[{type:'type',text:'reply'}],content:[{type:'type',text:'reply'}]};
-const schema={history:{isComplete:'boolean',entitiesByKey:{$map:{inherited:'boolean',isInherited:'boolean',items:[itemSchema]}}}};
+const schema={history:{isComplete:'boolean',entitiesByKey:{$map:{inherited:'boolean',isInherited:'boolean',rootTurnId:'id',turnId:'id',params:{input:inputSchema},items:[itemSchema]}},islands:[{entries:[{key:'id'}],newerBoundary:{status:'boundary'}}]}};
 const messageFields={agentMessage:['type','id','delivery','questions'],userMessage:['type','content','input'],steeringUserMessage:['type','status','steerAcknowledged','input','content']};
 const fieldsFor=type=>Object.hasOwn(messageFields,type)?messageFields[type]:null;
 const own=(object,key)=>object!=null&&Object.hasOwn(object,key);
@@ -46,7 +47,7 @@ class InputState{
   if(shape==='reply'){const result=replyMetadata(value,budget);if(result.invalid)this.invalid=true;return result;}
   if(shape==='boolean')return value===true;
   if(typeof shape==='string'){
-   const allowed={type:['agentMessage','userMessage','steeringUserMessage','text'],delivery:['async'],status:['accepted']};
+   const allowed={type:['agentMessage','userMessage','steeringUserMessage','text'],delivery:['async'],status:['accepted'],boundary:['exhausted']};
    if(shape==='id')return typeof value==='string'&&value.length<=512?value:null;
    return allowed[shape]?.includes(value)?value:null;
   }
@@ -118,11 +119,34 @@ class InputState{
   if(!value||typeof value!=='object')return 1;
   let count=1;for(const key of Object.keys(value)){count+=this.size(value[key]);if(count>LIMIT)break;}return count;
  }
+ interactionEntities(history){
+  // entitiesByKey is a lookup table, not chronological order. Only an island
+  // with a confirmed newest boundary can identify the current interaction.
+  const tails=(history?.islands||[]).filter(island=>island?.newerBoundary?.status==='exhausted');
+  if(tails.length!==1||!tails[0].entries?.length)return null;
+  const ordered=[];let roots=new Set(),uncertain=false;const seen=new Set();
+  for(const entry of tails[0].entries){
+   const entity=history.entitiesByKey?.[entry?.key];if(!entity)return null;
+   if(entity.inherited||entity.isInherited)continue;
+   const root=entity.rootTurnId||entity.turnId;if(!root)return null;
+   if(!seen.has(root)){
+    const user=entity.items?.find(item=>item?.type==='userMessage');
+    const parts=entity.params?.input?.length?entity.params.input:user?.input||user?.content||[];
+    const replyOnly=parts.length>0&&parts.every(part=>part?.type==='text'&&part.text?.ids?.length&&!part.text.invalid);
+    if(!parts.length&&roots.size)uncertain=true;
+    else if(!replyOnly){roots=new Set();uncertain=false;}
+    roots.add(root);seen.add(root);
+   }
+   ordered.push(entity);
+  }
+  return uncertain?null:ordered.filter(entity=>roots.has(entity.rootTurnId||entity.turnId));
+ }
  summary(){
   if(this.cached)return this.cached;
   const pending=new Set(),answered=new Set();let invalid=this.invalid;
   const history=this.data?.history;
-  for(const entity of Object.values(history?.entitiesByKey||{})){
+  const current=this.interactionEntities(history);if(!current)invalid=true;
+  for(const entity of current||[]){
    if(!entity)continue;
    if(entity.inherited||entity.isInherited)continue;
    for(const item of entity.items||[]){
