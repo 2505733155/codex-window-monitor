@@ -1,6 +1,35 @@
 const {test}=require('node:test');const assert=require('node:assert/strict');const net=require('node:net');const os=require('node:os');const path=require('node:path');const {randomUUID}=require('node:crypto');
 const {Collector}=require('../src/collector.cjs');const {MonitorState}=require('../src/state.cjs');const {encode,FrameDecoder}=require('../src/protocol.cjs');
 function until(emitter,predicate){if(predicate())return Promise.resolve();return new Promise((resolve,reject)=>{const timer=setTimeout(()=>{emitter.off('change',check);reject(new Error('state wait timed out'));},3000);function check(){if(predicate()){clearTimeout(timer);emitter.off('change',check);resolve();}}emitter.on('change',check);});}
+test('oversized IPC frames retain a diagnostic through reconnect and recover after valid snapshots',async t=>{
+ const endpoint=process.platform==='win32'?'\\\\.\\pipe\\codex-size-test-'+randomUUID():path.join(os.tmpdir(),'codex-size-'+randomUUID()+'.sock');
+ const sockets=new Set();let connections=0,activeSocket,autoSnapshot=true;
+ const server=net.createServer(socket=>{activeSocket=socket;sockets.add(socket);socket.on('close',()=>sockets.delete(socket));const index=++connections;
+  const send=value=>socket.write(encode(value));const decoder=new FrameDecoder(m=>{
+   if(m.type==='request')send({type:'response',requestId:m.requestId,resultType:'success',handledByClientId:'owner',result:m.method==='initialize'?{clientId:'observer'}:m.method==='ide-context'?{ideContext:{}}:{}});
+   if(m.method==='initialize'){
+    if(index===1){const header=Buffer.alloc(4);header.writeUInt32LE(2048);socket.write(header);}
+    else send({type:'broadcast',method:'thread-stream-following-changed',version:1,sourceClientId:'owner',params:{hostId:'local',conversationId:'fixture',following:true}});
+   }
+   if(m.type==='broadcast'&&m.params.following&&autoSnapshot)send({type:'broadcast',method:'thread-stream-state-changed',version:11,sourceClientId:'owner',params:{hostId:'local',conversationId:'fixture',change:{type:'snapshot',revision:1,conversationState:{cwd:'D:/fixture',threadRuntimeStatus:{type:'idle'}}}}});
+  });socket.on('data',chunk=>decoder.push(chunk));
+ });
+ await new Promise(resolve=>server.listen(endpoint,resolve));const state=new MonitorState();const collector=new Collector(state,{endpoint,retryMs:20,maxFrameBytes:1024,recoveryMs:120});
+ t.after(async()=>{collector.stop();for(const socket of sockets)socket.destroy();await new Promise(resolve=>server.close(resolve));});
+ collector.start();await until(state,()=>state.snapshot().diagnostic?.active===true);
+ assert.equal(state.snapshot().diagnostic.code,'IPC_FRAME_TOO_LARGE');assert.equal(state.snapshot().diagnostic.observedBytes,2048);
+ await until(state,()=>state.snapshot().connection==='connected'&&state.snapshot().rows[0]?.status==='idle'&&state.snapshot().diagnostic?.active===false);
+ assert.equal(state.snapshot().diagnostic.count,1);assert.equal(connections,2);
+ state.collectionError({code:'IPC_INVALID_JSON'});
+ activeSocket.write(encode({type:'broadcast',method:'thread-stream-state-changed',version:11,sourceClientId:'owner',params:{hostId:'local',conversationId:'fixture',change:{type:'snapshot',revision:2,conversationState:{cwd:'D:/fixture',threadRuntimeStatus:{type:'idle'}}}}}));
+ await until(state,()=>state.snapshot().rows[0]?.revision===2);await new Promise(resolve=>setTimeout(resolve,70));autoSnapshot=false;
+ activeSocket.write(encode({type:'broadcast',method:'thread-stream-state-changed',version:11,sourceClientId:'owner',params:{hostId:'local',conversationId:'fixture',change:{type:'patches',baseRevision:4,revision:5,patches:[]}}}));
+ await until(state,()=>state.snapshot().rows[0]?.status==='unknown');await new Promise(resolve=>setTimeout(resolve,20));
+ activeSocket.write(encode({type:'broadcast',method:'thread-stream-state-changed',version:11,sourceClientId:'owner',params:{hostId:'local',conversationId:'fixture',change:{type:'snapshot',revision:6,conversationState:{cwd:'D:/fixture',threadRuntimeStatus:{type:'idle'}}}}}));
+ await until(state,()=>state.snapshot().rows[0]?.revision===6);await new Promise(resolve=>setTimeout(resolve,50));assert.equal(state.snapshot().diagnostic.active,true,'a revision gap must restart the stable recovery interval');
+ await until(state,()=>state.snapshot().diagnostic.active===false);
+ state.collectionError({code:'IPC_INVALID_JSON'});state.removeClient('owner');await new Promise(resolve=>setTimeout(resolve,150));assert.equal(state.snapshot().diagnostic.active,true,'an empty session set cannot prove recovery');
+});
 test('real pipe discovery, read-only subscriptions, resync and reconnect',async t=>{
  const endpoint=process.platform==='win32'?'\\\\.\\pipe\\codex-monitor-test-'+randomUUID():path.join(os.tmpdir(),'codex-'+randomUUID()+'.sock');
  const sockets=new Set(),sent=[];let connections=0,revision=1,status='idle',autoSnapshot=true,thread='thread',owner='owner';

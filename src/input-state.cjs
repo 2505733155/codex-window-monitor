@@ -2,6 +2,7 @@
 // A bounded projection of canonical history. Text is decoded immediately into
 // reply IDs; question bodies, chat, tool arguments and output never enter it.
 const LIMIT=30000,ARRAY_LIMIT=10000;
+const REPLY_METADATA=Symbol('monitor-reply-metadata');
 const inputSchema=[{type:'type',text:'reply'}];
 const itemSchema={type:'type',id:'id',delivery:'delivery',questions:['question'],status:'status',steerAcknowledged:'boolean',input:[{type:'type',text:'reply'}],content:[{type:'type',text:'reply'}]};
 const schema={history:{isComplete:'boolean',entitiesByKey:{$map:{inherited:'boolean',isInherited:'boolean',rootTurnId:'id',turnId:'id',params:{input:inputSchema},items:[itemSchema]}},islands:[{entries:[{key:'id'}],newerBoundary:{status:'boundary'}}]}};
@@ -32,6 +33,10 @@ function replyMetadata(text,budget){
   return {ids};
  }catch{return {ids:[],invalid:true};}
 }
+function compactReply(text,overflow=false){
+ const value=overflow?{ids:[],invalid:true}:replyMetadata(text,{left:1000});
+ return {[REPLY_METADATA]:value};
+}
 class InputState{
  constructor(){this.data=null;this.invalid=false;this.cached=null;}
  project(value,shape,budget){
@@ -44,7 +49,12 @@ class InputState{
    value=Object.fromEntries(fields.filter(key=>own(value,key)).map(key=>[key,value[key]]));
   }
   if(shape==='question')return null;
-  if(shape==='reply'){const result=replyMetadata(value,budget);if(result.invalid)this.invalid=true;return result;}
+  if(shape==='reply'){
+   const prepared=value?.[REPLY_METADATA];
+   const result=prepared?{ids:prepared.ids.slice(),...(prepared.invalid?{invalid:true}:{})}:replyMetadata(value,budget);
+   if(prepared)budget.left-=result.ids.length;
+   if(result.invalid||budget.left<0)this.invalid=true;return result;
+  }
   if(shape==='boolean')return value===true;
   if(typeof shape==='string'){
    const allowed={type:['agentMessage','userMessage','steeringUserMessage','text'],delivery:['async'],status:['accepted'],boundary:['exhausted']};
@@ -164,4 +174,4 @@ class InputState{
   return this.cached={pendingInputCount:pending.size,inputSync:invalid||!history?'unknown':history.isComplete===true?'complete':'partial'};
  }
 }
-module.exports={InputState};
+module.exports={InputState,compactReply,fieldsFor,itemProjection:itemSchema,historyProjection:{kind:'type',...schema}};

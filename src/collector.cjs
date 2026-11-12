@@ -3,12 +3,14 @@ const net=require('node:net');const {randomUUID}=require('node:crypto');
 const {encode,FrameDecoder,validateOutbound}=require('./protocol.cjs');
 const {normalizeDirectory}=require('./state.cjs');
 class Collector{
- constructor(state,{endpoint='\\\\.\\pipe\\codex-ipc',retryMs=500,removeAfterMs=10000}={}){
+ constructor(state,{endpoint='\\\\.\\pipe\\codex-ipc',retryMs=500,removeAfterMs=10000,maxFrameBytes,recoveryMs=30000}={}){
   this.state=state;this.endpoint=endpoint;this.retryMs=retryMs;this.removeAfterMs=removeAfterMs;
+  this.maxFrameBytes=maxFrameBytes;this.recoveryMs=recoveryMs;this.decodeFailures=0;
   this.pending=new Map();this.followed=new Map();this.checked=new Map();this.removals=new Map();this.resyncs=new Map();
   this.announcers=new Map();this.owners=new Map();this.ownerQueries=new Map();
   this.clientId='initializing-client';this.stopped=true;this.epoch=0;this.attempt=0;
   this.onResync=record=>this.resync(record);state.on('resync',this.onResync);
+  this.onRecovery=()=>this.updateRecovery();state.on('change',this.onRecovery);
  }
  start(){if(!this.stopped)return;this.stopped=false;this.connect();}
  send(message){validateOutbound(message);if(this.socket?.writable&&!this.socket.destroyed)this.socket.write(encode(message));}
@@ -127,11 +129,18 @@ class Collector{
    for(const threadId of previousThreads)if(!this.followed.has('local:'+threadId))this.state.removeThread(threadId);
   },this.removeAfterMs);this.reconcileTimer.unref();
  }
+ updateRecovery(){
+  const ready=()=>!this.stopped&&this.state.connection==='connected'&&this.state.rows.size>0&&[...this.state.rows.values()].every(row=>row.synced&&row.status!=='unknown');
+  if(!this.state.diagnostic?.active||!ready()){clearTimeout(this.recoveryTimer);this.recoveryTimer=null;return;}
+  if(this.recoveryTimer)return;const epoch=this.epoch;
+  this.recoveryTimer=setTimeout(()=>{this.recoveryTimer=null;if(epoch===this.epoch&&ready()){this.decodeFailures=0;this.state.collectionRecovered();}},this.recoveryMs);this.recoveryTimer.unref();
+ }
  connect(){
   if(this.stopped)return;
   const epoch=++this.epoch;this.clientId='initializing-client';
   const socket=net.createConnection(this.endpoint);this.socket=socket;
-  const decoder=new FrameDecoder(message=>this.handle(message,epoch));
+  let fault=null;
+  const decoder=new FrameDecoder(message=>this.handle(message,epoch),{streaming:true,maxBytes:this.maxFrameBytes});
   let initTimer=setTimeout(()=>socket.destroy(),6000);initTimer.unref();
   socket.on('connect',()=>{
    if(this.stopped||epoch!==this.epoch){socket.destroy();return;}
@@ -140,17 +149,25 @@ class Collector{
     clearTimeout(initTimer);this.clientId=message.result.clientId;this.attempt=0;this.state.connected();this.reconcile(epoch);
    });
   });
-  socket.on('data',chunk=>{try{decoder.push(chunk);}catch{this.state.disconnected('状态通信数据无效，正在重连');socket.destroy();}});
+  socket.on('data',chunk=>{
+   if(fault)return;
+   try{
+    decoder.push(chunk);
+   }catch(error){fault=error;this.decodeFailures++;this.state.collectionError(error);this.state.disconnected(this.state.diagnostic.message+'，正在重新同步');socket.destroy();}
+  });
   socket.on('error',()=>{});
   socket.on('close',()=>{
+   decoder.discard();
    clearTimeout(initTimer);if(epoch!==this.epoch)return;
    this.clearTransient();this.followed.clear();this.checked.clear();this.announcers.clear();this.owners.clear();this.ownerQueries.clear();
    if(this.stopped)return;
-   this.state.disconnected('尚未连接到 Codex，正在重试');
-   this.retry=setTimeout(()=>this.connect(),Math.min(5000,this.retryMs*2**Math.min(this.attempt++,4)));
+   this.state.disconnected(fault?this.state.diagnostic.message+'，正在重试':'尚未连接到 Codex，正在重试');
+   const delay=Math.max(Math.min(5000,this.retryMs*2**Math.min(this.attempt++,4)),Math.min(30000,this.retryMs*2**Math.min(this.decodeFailures,6)));
+   this.retry=setTimeout(()=>this.connect(),delay);
   });
  }
  clearTransient(){
+  clearTimeout(this.recoveryTimer);this.recoveryTimer=null;
   clearTimeout(this.reconcileTimer);this.reconcileTimer=null;
   for(const {timer}of this.pending.values())clearTimeout(timer);this.pending.clear();
   for(const timer of this.removals.values())clearTimeout(timer);this.removals.clear();
@@ -162,6 +179,7 @@ class Collector{
   this.clearTransient();this.followed.clear();this.socket?.end();
   const socket=this.socket;setTimeout(()=>socket?.destroy(),300).unref();
   this.state.off('resync',this.onResync);this.state.disconnected('监控已停止');
+  this.state.off('change',this.onRecovery);
  }
 }
 module.exports={Collector};

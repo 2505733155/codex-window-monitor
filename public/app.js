@@ -53,8 +53,10 @@ function render(){
  }
  $('showing').textContent='显示 '+visible.length+' / '+rows.length+' 个已发现窗口 · 共 '+(snapshot.sessionCount??rows.length)+' 个会话';
  $('connection').textContent=linked?(snapshot.connection==='connected'?'● 实时连接':'○ 等待 Codex'):'○ 页面连接中断';
- $('notice').hidden=linked&&snapshot.connection==='connected';
- $('notice').textContent=linked?(snapshot.connectionReason||'等待连接 Codex'):'本机监控服务连接中断，旧状态已标为未知；正在重新连接。';
+ const diagnostic=snapshot.diagnostic;
+ $('notice').hidden=linked&&snapshot.connection==='connected'&&!diagnostic?.active;
+ const bytes=value=>value>=1048576?(value/1048576).toFixed(2)+' MiB':value>=1024?(value/1024).toFixed(2)+' KiB':value+' B';
+ $('notice').textContent=diagnostic?.active?[diagnostic.message,diagnostic.observedBytes!=null?'实际 '+bytes(diagnostic.observedBytes):'',diagnostic.limitBytes!=null?'上限 '+bytes(diagnostic.limitBytes):'','错误码 '+diagnostic.code,'最近发生 '+new Date(diagnostic.lastOccurredAt).toLocaleString(),'累计 '+diagnostic.count+' 次','该次连接的状态已失效，正在重新同步；无法从消息头确认来源窗口。'].filter(Boolean).join(' · '):linked?(snapshot.connectionReason||'等待连接 Codex'):'本机监控服务连接中断，旧状态已标为未知；正在重新连接。';
  if($('detail').open)renderDetail();
 }
 function renderDetail(){

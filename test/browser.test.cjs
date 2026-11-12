@@ -38,6 +38,12 @@ function browser({fetch=async()=>{throw new Error('Unexpected network request');
  return {nodes,context,all,setTime:value=>{now=value;},tick:()=>{streams.at(-1).handlers.heartbeat?.();tick();},send:rows=>streams.at(-1).handlers.state({data:JSON.stringify({rows,connection:'connected'})})};
 }
 const sampleRow={id:'owner:local:thread',ownerClientId:'owner',threadId:'thread',cwd:'D:\\project',name:'project',status:'idle',reason:'等待输入',mapping:'project-match',since:0,sinceKnown:true,lastSeen:null};
+test('collection errors remain visible while reconnecting and show actionable size diagnostics',()=>{
+ const page=browser();page.send([sampleRow]);
+ vm.runInContext("snapshot.diagnostic={active:true,code:'IPC_FRAME_TOO_LARGE',message:'Codex 状态消息超过接收上限',observedBytes:314572800,limitBytes:268435456,lastOccurredAt:1000,count:2};render()",page.context);
+ const notice=page.nodes.get('notice');assert.equal(notice.hidden,false);assert.match(notice.textContent,/300.*MiB/);assert.match(notice.textContent,/256.*MiB/);assert.match(notice.textContent,/IPC_FRAME_TOO_LARGE/);assert.match(notice.textContent,/2/);
+ vm.runInContext("snapshot.diagnostic.active=false;render()",page.context);assert.equal(notice.hidden,true);
+});
 
 test('pending answers rank ahead of idle while blocked stays last and real status filters remain intact',()=>{
  const page=browser();const pending={...sampleRow,id:'pending',name:'Z',status:'busy',awaitingInput:true,pendingInputCount:1,inputSync:'partial'};

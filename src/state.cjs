@@ -34,6 +34,14 @@ class MonitorState extends EventEmitter{
  constructor({clock=Date.now}={}){super();this.clock=clock;this.rows=new Map();this.windowTimings=new Map();this.windowBlocks=new Map();this.connection='connecting';this.connectionReason='正在连接 Codex';this.sequence=0;}
  changed(){this.sequence++;this.windowSnapshot();this.emit('change',this.snapshot());}
  connected(){this.connection='connected';this.connectionReason='已连接 Codex';this.changed();}
+ collectionError(error){
+  const messages={IPC_FRAME_TOO_LARGE:'Codex 状态消息超过接收上限',IPC_INVALID_FRAME:'Codex 状态消息帧长度无效',IPC_INVALID_JSON:'Codex 状态消息格式无效',IPC_JSON_RESOURCE_LIMIT:'Codex 状态消息超过解析资源上限'};
+  const code=Object.hasOwn(messages,error?.code)?error.code:'IPC_PROCESSING_ERROR',now=this.clock();
+  const bytes=value=>Number.isSafeInteger(value)&&value>=0&&value<=0xffffffff?value:null;
+  this.diagnostic={code,message:messages[code]||'Codex 状态消息处理失败',observedBytes:bytes(error?.observedBytes),limitBytes:bytes(error?.limitBytes),lastOccurredAt:now,count:(this.diagnostic?.count||0)+1,active:true,scope:'connection'};
+  this.changed();
+ }
+ collectionRecovered(){if(this.diagnostic?.active){this.diagnostic={...this.diagnostic,active:false};this.changed();}}
  disconnected(reason='采集连接中断'){
   this.connection='disconnected';this.connectionReason=reason;
   for(const row of this.rows.values()){row.synced=false;row.revision=null;row.minimumRevision=0;this.unknown(row,reason);}
@@ -157,7 +165,7 @@ class MonitorState extends EventEmitter{
  }
  snapshot(){
   const counts=new Map();for(const row of this.rows.values()){const key=row.cwd.toLowerCase();counts.set(key,(counts.get(key)||0)+1);}
-  return {sequence:this.sequence,connection:this.connection,connectionReason:this.connectionReason,observedAt:this.clock(),
+  return {sequence:this.sequence,connection:this.connection,connectionReason:this.connectionReason,diagnostic:this.diagnostic||null,observedAt:this.clock(),
    rows:[...this.rows.values()].map(row=>{const {raw,synced,minimumRevision,inputState,...safe}=row;return {...safe,...inputSummary(row,this.connection),mapping:counts.get(row.cwd.toLowerCase())>1?'ambiguous':row.ideClientId?'project-match':'unconfirmed'};})};
  }
 }

@@ -32,6 +32,14 @@ test('default decoder still rejects excessive declared frame sizes before alloca
  const header=Buffer.alloc(4);header.writeUInt32LE(1024*1024*1024);
  assert.throws(()=>decoder.push(header),/frame/i);assert.equal(decoder.body,null);
 });
+test('collection diagnostics expose only stable metadata and survive reconnect until recovery',()=>{
+ const state=new MonitorState({clock:()=>1000});state.connected();state.ingest(snap());
+ state.collectionError({code:'IPC_FRAME_TOO_LARGE',observedBytes:300*1024*1024,limitBytes:256*1024*1024,message:'SECRET RAW PAYLOAD'});
+ state.disconnected();state.connected();const diagnostic=state.snapshot().diagnostic;
+ assert.equal(diagnostic.code,'IPC_FRAME_TOO_LARGE');assert.equal(diagnostic.active,true);assert.equal(diagnostic.observedBytes,314572800);assert.equal(diagnostic.limitBytes,268435456);assert.equal(diagnostic.count,1);
+ state.collectionError({code:'IPC_FRAME_TOO_LARGE',observedBytes:314572800,limitBytes:268435456});assert.equal(state.snapshot().diagnostic.count,2);
+ assert.doesNotMatch(JSON.stringify(state.snapshot()),/SECRET/);state.collectionRecovered();assert.equal(state.snapshot().diagnostic.active,false);
+});
 test('outbound whitelist refuses task mutation, unknown and malformed subscription messages',()=>{
  assert.throws(()=>validateOutbound({type:'request',method:'turn/start',params:{}}),/read.only/i);
  assert.throws(()=>validateOutbound({type:'broadcast',method:'thread-stream-following-changed',params:{following:'yes'}}));
