@@ -2,7 +2,10 @@
 // A bounded projection of canonical history. Text is decoded immediately into
 // reply IDs; question bodies, chat, tool arguments and output never enter it.
 const LIMIT=30000,ARRAY_LIMIT=10000;
-const schema={history:{isComplete:'boolean',entitiesByKey:{$map:{inherited:'boolean',isInherited:'boolean',items:[{type:'type',id:'id',delivery:'delivery',questions:['question'],status:'status',steerAcknowledged:'boolean',input:[{type:'type',text:'reply'}],content:[{type:'type',text:'reply'}]}]}}}};
+const itemSchema={type:'type',id:'id',delivery:'delivery',questions:['question'],status:'status',steerAcknowledged:'boolean',input:[{type:'type',text:'reply'}],content:[{type:'type',text:'reply'}]};
+const schema={history:{isComplete:'boolean',entitiesByKey:{$map:{inherited:'boolean',isInherited:'boolean',items:[itemSchema]}}}};
+const messageFields={agentMessage:['type','id','delivery','questions'],userMessage:['type','content','input'],steeringUserMessage:['type','status','steerAcknowledged','input','content']};
+const fieldsFor=type=>Object.hasOwn(messageFields,type)?messageFields[type]:null;
 const own=(object,key)=>object!=null&&Object.hasOwn(object,key);
 function child(shape,key){
  if(Array.isArray(shape))return /^(0|[1-9]\d*)$/.test(String(key))||key==='-'?shape[0]:undefined;
@@ -32,6 +35,13 @@ class InputState{
  constructor(){this.data=null;this.invalid=false;this.cached=null;}
  project(value,shape,budget){
   if(--budget.left<0){this.invalid=true;return null;}
+  if(shape===itemSchema){
+   const fields=fieldsFor(value?.type);
+   // Keep an index placeholder for unrelated items so JSON patches still line
+   // up, but never traverse their reasoning, tool output or other payloads.
+   if(!fields)return null;
+   value=Object.fromEntries(fields.filter(key=>own(value,key)).map(key=>[key,value[key]]));
+  }
   if(shape==='question')return null;
   if(shape==='reply'){const result=replyMetadata(value,budget);if(result.invalid)this.invalid=true;return result;}
   if(shape==='boolean')return value===true;
@@ -69,6 +79,19 @@ class InputState{
   if(at[0]!=='turnHistory')return;
   if(at[1]==='kind'){this.invalid=true;this.cached=null;return;}
   if(at.length===1){this.snapshot({turnHistory:op==='remove'?null:value});return;}
+  if(at.length>6&&at[1]==='history'&&at[2]==='entitiesByKey'&&at[4]==='items'){
+   const items=this.data?.history?.entitiesByKey?.[at[3]]?.items,index=at[5];
+   if(own(items,index)){
+    const item=items[index],fields=fieldsFor(item?.type);
+    if(at[6]==='type'&&at.length===7&&(op==='remove'||value!==item?.type)){
+     // A type-only transition cannot reconstruct fields discarded earlier.
+     // Full item replacements, handled below, can recover those fields.
+     if(fields||fieldsFor(value)){items[index]=null;this.invalid=true;this.cached=null;}
+     return;
+    }
+    if(!fields?.includes(at[6]))return;
+   }
+  }
   let shape=schema;
   for(const key of at.slice(1)){shape=child(shape,key);if(!shape)return;}
   this.cached=null;

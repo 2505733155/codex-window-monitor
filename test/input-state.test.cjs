@@ -74,3 +74,31 @@ test('reply identifiers share the projection budget rather than growing without 
  const h=harness(Array.from({length:100},()=>reply('accepted',ids)));
  assert.equal(h.row().inputSync,'unknown');assert.ok(JSON.stringify([...h.state.rows.values()]).length<2000000);
 });
+test('long histories preserve current questions without retaining unrelated reasoning and tool metadata',()=>{
+ const history=Array.from({length:7500},(_,index)=>({type:index%2?'reasoning':'tool',id:'unused-'+index,content:[{type:'text',text:'SECRET HISTORY'}],input:[{type:'text',text:'SECRET TOOL INPUT'}],output:'SECRET OUTPUT'}));
+ const h=harness([...history,question,reply()],false);
+ assert.equal(h.row().pendingInputCount,1);assert.equal(h.row().awaitingInput,true);assert.equal(h.row().inputSync,'partial');assert.equal(h.row().status,'busy');
+ assert.doesNotMatch(JSON.stringify([...h.state.rows.values()]),/SECRET|unused-/);
+ const at=['turnHistory','history','entitiesByKey','tail/0','items'];
+ h.patch([...at,0,'content',0,'text'],'SECRET UPDATED');assert.equal(h.row().inputSync,'partial');
+ h.patch([...at,0],undefined,'remove');
+ h.patch([...at,0],{type:'reasoning',id:'unused-added',content:[{type:'text',text:'SECRET NEW'}]},'add');
+ h.patch([...at,7502],reply('accepted',['["request_user_input_async","call_test",1]']),'add');
+ assert.equal(h.row().pendingInputCount,0);assert.equal(h.row().inputSync,'partial');
+ h.patch([...at,7502],undefined,'remove');assert.equal(h.row().pendingInputCount,1);
+ h.patch([...at,0],{...question,id:'replacement'},'replace');assert.equal(h.row().pendingInputCount,3);
+ assert.doesNotMatch(JSON.stringify([...h.state.rows.values()]),/SECRET|unused-/);
+});
+test('unrelated assistant text and tool fields cannot invalidate question tracking',()=>{
+ const h=harness([{type:'agentMessage',id:'ordinary',delivery:null,questions:null,content:'SECRET ASSISTANT',input:{arguments:'SECRET TOOL'}},question]);
+ assert.equal(h.row().inputSync,'complete');assert.equal(h.row().pendingInputCount,2);
+ h.patch(['turnHistory','history','entitiesByKey','tail/0','items',0,'content'],'SECRET UPDATE');
+ assert.equal(h.row().inputSync,'complete');assert.doesNotMatch(JSON.stringify([...h.state.rows.values()]),/SECRET/);
+});
+test('accepted steering replies retain the content fallback in snapshots and patches',()=>{
+ const message={...reply(),content:reply().input};delete message.input;
+ const h=harness([question,message]);assert.equal(h.row().pendingInputCount,1);assert.equal(h.row().inputSync,'complete');
+ h.patch(['turnHistory','history','entitiesByKey','tail/0','items',1,'content'],reply('accepted',['["request_user_input_async","call_test",1]']).input);
+ assert.equal(h.row().pendingInputCount,1);
+ h.patch(['turnHistory','history','entitiesByKey','tail/0','items',2],message,'add');assert.equal(h.row().pendingInputCount,0);
+});
