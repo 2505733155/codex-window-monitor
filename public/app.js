@@ -7,7 +7,13 @@ let blockRowId=null,blockSaving=false;
 try{filter=localStorage.getItem('codex-filter')||'all';$('search').value=localStorage.getItem('codex-search')||'';$('idle-first').checked=localStorage.getItem('codex-idle-first')!=='false';}catch{}
 if(!['all','idle','busy','other'].includes(filter))filter='all';
 function element(tag,className,text){const node=document.createElement(tag);if(className)node.className=className;if(text!==undefined)node.textContent=text;return node;}
-function effective(row){return linked&&snapshot.connection==='connected'?row:{...row,status:'unknown',reason:'连接已中断，状态未确认'};}
+function effective(row){return linked&&snapshot.connection==='connected'?row:{...row,status:'unknown',awaitingInput:false,pendingInputCount:0,inputSync:'unknown',reason:'连接已中断，状态未确认'};}
+function statusLabel(row){return row.awaitingInput?(row.status==='idle'?'等待回答':(labels[row.status]||'未知')+' · 待回答'):labels[row.status]||'未知';}
+function inputNote(row){
+ const count=row.pendingInputCount||0,sync=row.inputSync;
+ return (count?(sync==='complete'?'':'至少 ')+count+' 个问题待回答':'')+(sync&&sync!=='complete'?(count?' · ':'')+(sync==='partial'?'问题记录未完全同步':'待回答状态未确认'):'');
+}
+function stateNote(row){return [row.reason,inputNote(row)].filter(Boolean).join(' · ');}
 function duration(row,precise=false){
  if(row.status==='unknown')return '—';
  const seconds=Math.max(0,Math.floor((Date.now()-row.since)/1000));let text;
@@ -20,7 +26,7 @@ function save(){try{localStorage.setItem('codex-filter',filter);localStorage.set
 function render(){
  const rows=snapshot.rows.map(effective);const query=$('search').value.trim().toLowerCase();
  let visible=rows.filter(row=>(filter==='all'||row.status===filter||filter==='other'&&!['idle','busy'].includes(row.status))&&[row,...(row.sessions||[])].some(value=>((value.name||'')+' '+(value.cwd||'')).toLowerCase().includes(query)));
- visible.sort((a,b)=>Number(!!a.blocked)-Number(!!b.blocked)||($('idle-first').checked?(a.status==='idle'?0:1)-(b.status==='idle'?0:1)||a.name.localeCompare(b.name):0));
+ visible.sort((a,b)=>Number(!!a.blocked)-Number(!!b.blocked)||Number(!!b.awaitingInput)-Number(!!a.awaitingInput)||($('idle-first').checked?(a.status==='idle'?0:1)-(b.status==='idle'?0:1)||a.name.localeCompare(b.name):0));
  const counts={all:rows.length,idle:0,busy:0,other:0};for(const row of rows)counts[['idle','busy'].includes(row.status)?row.status:'other']++;
  for(const key of Object.keys(counts))$('count-'+key).textContent=counts[key];
  document.querySelectorAll('[data-filter]').forEach(button=>{button.classList.toggle('active',button.dataset.filter===filter);button.setAttribute('aria-pressed',String(button.dataset.filter===filter));});
@@ -35,7 +41,7 @@ function render(){
   const directory=element('div','project-path',row.cwd||(row.projectAmbiguous?'项目目录待确认，见详情':'目录待识别'));directory.title=row.cwd;info.append(name,directory);
   if(row.blocked){const note=element('div','block-note',row.blockReason||'未填写阻塞原因');note.title=row.blockReason||'未填写阻塞原因';info.append(note);}
   project.append(folder,info);projectCell.append(project);
-  const statusCell=element('td'),badge=element('span','badge '+row.status),dot=element('i','dot');badge.append(dot,document.createTextNode(labels[row.status]||'未知'));statusCell.append(badge,element('div','state-note',row.reason));
+  const statusCell=element('td'),badge=element('span','badge '+row.status+(row.awaitingInput?' awaiting-input':'')),dot=element('i','dot');badge.append(dot,document.createTextNode(statusLabel(row)));statusCell.append(badge,element('div','state-note',stateNote(row)));
   const timeCell=element('td'),elapsed=element('div','elapsed',duration(row));elapsed.dataset.duration=row.id;elapsed.append(element('small',null,row.status==='unknown'?'状态未确认':row.sinceKnown?(row.status==='idle'?'空闲时长':'当前状态时长'):'监测以来'));timeCell.append(elapsed);
   const actionCell=element('td'),actions=element('div','row-actions'),go=element('button','detail-button go-button',navigating&&navigationRowId===row.id?'正在前往…':'前往窗口');
   go.dataset.windowAction=row.id;go.disabled=navigating;go.setAttribute('aria-label','前往 '+row.name+' 所在的窗口');go.addEventListener('click',()=>navigateWindow(row.id));
@@ -54,16 +60,16 @@ function render(){
 function renderDetail(){
  const original=snapshot.rows.find(row=>row.id===selectedId);if(!original){$('detail').close();return;}const row=effective(original);
  $('detail-title').textContent=row.name;$('detail-fields').replaceChildren();
- const fields=[['项目目录',row.cwd||'待识别'],['Codex 状态',(labels[row.status]||'未知')+' · '+row.reason],['状态持续',duration(row,true)],['窗口对应',row.mapping==='project-match'?'已按项目目录核对':row.mapping==='ambiguous'?'存在多个可能对应的项目或窗口，实际归属待确认':'窗口归属待确认'],['最后确认',row.lastSeen?new Date(row.lastSeen).toLocaleString():'尚未确认'],['窗口标识',row.ownerClientId.slice(0,8)],['会话数量',String(row.sessionCount||1)]];
+ const fields=[['项目目录',row.cwd||'待识别'],['Codex 状态',statusLabel(row)+' · '+stateNote(row)],['状态持续',duration(row,true)],['窗口对应',row.mapping==='project-match'?'已按项目目录核对':row.mapping==='ambiguous'?'存在多个可能对应的项目或窗口，实际归属待确认':'窗口归属待确认'],['最后确认',row.lastSeen?new Date(row.lastSeen).toLocaleString():'尚未确认'],['窗口标识',row.ownerClientId.slice(0,8)],['会话数量',String(row.sessionCount||1)]];
  if(row.blocked)fields.splice(2,0,['阻塞原因',row.blockReason||'未填写原因']);
  for(const [title,value]of fields){const dd=element('dd',null,value);if(title==='状态持续')dd.id='detail-duration';$('detail-fields').append(element('dt',null,title),dd);}
  const list=$('detail-sessions');if(list){
   list.replaceChildren();
   for(const original of row.sessions||[row]){
-   const session=effective(original),card=element('div','session-card'),head=element('div','session-head'),badge=element('span','badge '+session.status,labels[session.status]||'未知');
+   const session=effective(original),card=element('div','session-card'),head=element('div','session-head'),badge=element('span','badge '+session.status+(session.awaitingInput?' awaiting-input':''),statusLabel(session));
    head.append(element('span','session-id',session.threadId.slice(0,12)),badge);
    const elapsed=element('span','session-elapsed',duration(session,true));elapsed.dataset.sessionDuration=session.id;
-   card.append(head,element('div','state-note',session.reason),elapsed);
+   card.append(head,element('div','state-note',stateNote(session)),elapsed);
    if(session.cwd&&session.cwd!==row.cwd)card.append(element('div','session-path',session.cwd));
    list.append(card);
   }

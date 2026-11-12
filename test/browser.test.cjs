@@ -39,6 +39,18 @@ function browser({fetch=async()=>{throw new Error('Unexpected network request');
 }
 const sampleRow={id:'owner:local:thread',ownerClientId:'owner',threadId:'thread',cwd:'D:\\project',name:'project',status:'idle',reason:'等待输入',mapping:'project-match',since:0,sinceKnown:true,lastSeen:null};
 
+test('pending answers rank ahead of idle while blocked stays last and real status filters remain intact',()=>{
+ const page=browser();const pending={...sampleRow,id:'pending',name:'Z',status:'busy',awaitingInput:true,pendingInputCount:1,inputSync:'partial'};
+ const idle={...sampleRow,id:'idle',name:'A'},blocked={...pending,id:'blocked',blocked:true};
+ const order=()=>page.nodes.get('rows').children.map(row=>row.children[2].children[0].dataset.duration);
+ page.send([idle,blocked,pending]);assert.deepEqual(order(),['pending','idle','blocked']);assert.match(page.nodes.get('rows').children[0].textContent,/执行中 · 待回答/);assert.match(page.nodes.get('rows').children[0].textContent,/至少 1/);
+ page.nodes.get('idle-first').checked=false;page.nodes.get('idle-first').listeners.change();assert.deepEqual(order(),['pending','idle','blocked']);
+ vm.runInContext("filter='idle';render()",page.context);assert.deepEqual(order(),['idle']);
+ vm.runInContext("filter='all'",page.context);page.send([{...pending,status:'idle'},idle]);assert.match(page.nodes.get('rows').children[0].textContent,/等待回答/);
+ vm.runInContext('stream.onerror()',page.context);assert.doesNotMatch(page.nodes.get('rows').textContent,/等待回答|执行中 · 待回答/);
+ page.send([{...pending,awaitingInput:false,pendingInputCount:0,inputSync:'complete'},idle]);assert.doesNotMatch(page.nodes.get('rows').textContent,/待回答/);
+});
+
 test('list durations show whole minutes at boundaries and preserve uncertainty',()=>{
  const page=browser();
  const format=row=>vm.runInContext('duration('+JSON.stringify(row)+')',page.context);

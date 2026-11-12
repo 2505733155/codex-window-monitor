@@ -1,6 +1,7 @@
 'use strict';
 const {EventEmitter}=require('node:events');
 const path=require('node:path');
+const {InputState}=require('./input-state.cjs');
 function normalizeDirectory(cwd){
  if(!cwd)return '';
  let value=path.win32.normalize(cwd);const root=path.win32.parse(value).root;
@@ -21,6 +22,13 @@ function classify(value){
   return ['busy','当前轮正在执行'];
  }
  return ['unknown',value?.type==='notLoaded'?'会话未加载':'无法确认执行状态'];
+}
+function inputSummary(row,connection){
+ if(!row.synced||row.status==='unknown'||connection!=='connected')return {pendingInputCount:0,inputSync:'unknown',awaitingInput:false};
+ const input=row.inputState?.summary()||{pendingInputCount:0,inputSync:'unknown'};
+ const waiting=row.raw?.activeFlags.includes('waitingOnUserInput');
+ return {...input,pendingInputCount:Math.max(input.pendingInputCount,waiting?1:0),awaitingInput:!!waiting||input.pendingInputCount>0,
+  inputSync:waiting&&!input.pendingInputCount&&input.inputSync==='complete'?'partial':input.inputSync};
 }
 class MonitorState extends EventEmitter{
  constructor({clock=Date.now}={}){super();this.clock=clock;this.rows=new Map();this.windowTimings=new Map();this.windowBlocks=new Map();this.connection='connecting';this.connectionReason='正在连接 Codex';this.sequence=0;}
@@ -72,6 +80,7 @@ class MonitorState extends EventEmitter{
    if(!Number.isSafeInteger(c.revision)||c.revision<0||!c.conversationState||typeof c.conversationState!=='object')return invalidate('无效的会话快照');
    if(c.revision<row.minimumRevision||row.revision!==null&&c.revision<row.revision)return false;
    const s=c.conversationState;row.raw=runtime(s.threadRuntimeStatus);
+   row.inputState||=new InputState();row.inputState.snapshot(s);
    this.setDirectory(row,s.cwd);
 
    row.revision=c.revision;row.minimumRevision=c.revision;row.synced=true;
@@ -83,10 +92,10 @@ class MonitorState extends EventEmitter{
    }
    for(const patch of c.patches){
     if(!patch||!['add','replace','remove'].includes(patch.op)||!Array.isArray(patch.path)&&typeof patch.path!=='string')return invalidate('无法解释状态增量，正在重新同步');
-    const at=Array.isArray(patch.path)?patch.path:typeof patch.path==='string'?patch.path.split('/').filter(Boolean):[];
+    const at=Array.isArray(patch.path)?patch.path.map(String):patch.path===''?[]:patch.path.slice(1).split('/').map(part=>part.replace(/~1/g,'/').replace(/~0/g,'~'));
     if(at.length===0){
      if(patch.op==='remove'||!patch.value||typeof patch.value!=='object')return invalidate('会话状态被移除，正在重新同步');
-     row.raw=runtime(patch.value.threadRuntimeStatus);this.setDirectory(row,patch.value.cwd);continue;
+     row.raw=runtime(patch.value.threadRuntimeStatus);this.setDirectory(row,patch.value.cwd);row.inputState.snapshot(patch.value);continue;
     }
     if(at[0]==='threadRuntimeStatus'){
      if(at.length===1)row.raw=patch.op==='remove'?null:runtime(patch.value);
@@ -98,6 +107,7 @@ class MonitorState extends EventEmitter{
      }else return invalidate('未知状态字段变更');
     }
     if(at.length===1&&at[0]==='cwd'&&typeof patch.value==='string')this.setDirectory(row,patch.value);
+    row.inputState.patch(at,patch.op,patch.value);
    }
    row.revision=c.revision;row.minimumRevision=c.revision;
   }else return;
@@ -132,9 +142,11 @@ class MonitorState extends EventEmitter{
    this.windowTimings.set(id,timing);
    const labels={busy:'执行中',attention:'待处理',unknown:'未知',idle:'空闲'};
    const reason=members.length===1?representative.reason:members.length+' 个会话：'+Object.keys(counts).filter(key=>counts[key]).map(key=>counts[key]+' '+labels[key]).join('，');
-   const sessions=members.map(row=>({id:row.id,threadId:row.threadId,cwd:row.cwd,name:row.name,status:row.status,reason:row.reason,since:row.since,sinceKnown:row.sinceKnown,lastSeen:row.lastSeen}));
+   const pendingInputCount=members.reduce((sum,row)=>sum+row.pendingInputCount,0),awaitingInput=members.some(row=>row.awaitingInput);
+   const inputSync=members.every(row=>row.inputSync==='complete')?'complete':members.some(row=>row.inputSync==='unknown')?'unknown':'partial';
+   const sessions=members.map(row=>({id:row.id,threadId:row.threadId,cwd:row.cwd,name:row.name,status:row.status,reason:row.reason,since:row.since,sinceKnown:row.sinceKnown,lastSeen:row.lastSeen,pendingInputCount:row.pendingInputCount,awaitingInput:row.awaitingInput,inputSync:row.inputSync}));
    const ideClientId=project?.ideClientId||null;
-   rows.push({...representative,id,name:project?.name||'多项目窗口',cwd:project?.cwd||'',projectAmbiguous,blocked:this.windowBlocks.has(id),blockReason:this.windowBlocks.get(id)||'',status,reason,since:timing.since,sinceKnown:timing.sinceKnown,ideClientId,lastSeen:Math.max(...members.map(row=>row.lastSeen||0))||null,sessionCount:sessions.length,sessions});
+   rows.push({...representative,id,name:project?.name||'多项目窗口',cwd:project?.cwd||'',projectAmbiguous,blocked:this.windowBlocks.has(id),blockReason:this.windowBlocks.get(id)||'',status,reason,since:timing.since,sinceKnown:timing.sinceKnown,ideClientId,lastSeen:Math.max(...members.map(row=>row.lastSeen||0))||null,sessionCount:sessions.length,sessions,pendingInputCount,awaitingInput,inputSync});
   }
   for(const id of this.windowTimings.keys())if(!groups.has(id))this.windowTimings.delete(id);
   for(const id of this.windowBlocks.keys())if(!groups.has(id))this.windowBlocks.delete(id);
@@ -146,7 +158,7 @@ class MonitorState extends EventEmitter{
  snapshot(){
   const counts=new Map();for(const row of this.rows.values()){const key=row.cwd.toLowerCase();counts.set(key,(counts.get(key)||0)+1);}
   return {sequence:this.sequence,connection:this.connection,connectionReason:this.connectionReason,observedAt:this.clock(),
-   rows:[...this.rows.values()].map(row=>{const {raw,synced,minimumRevision,...safe}=row;return {...safe,mapping:counts.get(row.cwd.toLowerCase())>1?'ambiguous':row.ideClientId?'project-match':'unconfirmed'};})};
+   rows:[...this.rows.values()].map(row=>{const {raw,synced,minimumRevision,inputState,...safe}=row;return {...safe,...inputSummary(row,this.connection),mapping:counts.get(row.cwd.toLowerCase())>1?'ambiguous':row.ideClientId?'project-match':'unconfirmed'};})};
  }
 }
 module.exports={MonitorState,classify,normalizeDirectory};
