@@ -14,6 +14,24 @@ test('oversized and invalid JSON frames are rejected',()=>{
  assert.throws(()=>decoder.push(header),/frame/i);
  const bad=Buffer.from([2,0,0,0,123,34]);assert.throws(()=>new FrameDecoder(()=>{}).push(bad),/JSON/i);
 });
+test('large valid snapshots above 64 MiB decode without losing the next frame or retaining chat',()=>{
+ const state=new MonitorState();state.connected();let messages=0;
+ const decoder=new FrameDecoder(message=>{messages++;state.ingest(message);});
+ const prefix=Buffer.from('{"type":"broadcast","method":"thread-stream-state-changed","version":11,"sourceClientId":"fixture-owner","params":{"hostId":"local","conversationId":"fixture-thread","change":{"type":"snapshot","revision":1,"conversationState":{"cwd":"D:/fixture","threadRuntimeStatus":{"type":"idle"},"turns":[{"text":"');
+ const suffix=Buffer.from('"}]}}}}'),chunk=Buffer.alloc(1024*1024,120),header=Buffer.alloc(4);
+ header.writeUInt32LE(prefix.length+65*chunk.length+suffix.length);
+ decoder.push(Buffer.concat([header,prefix]));
+ for(let n=0;n<65;n++)decoder.push(chunk);
+ decoder.push(Buffer.concat([suffix,encode({type:'fixture-marker'})]));
+ assert.equal(messages,2);assert.equal(state.snapshot().rows[0].status,'idle');
+ assert.ok(JSON.stringify([...state.rows.values()]).length<10000);
+ assert.doesNotMatch(JSON.stringify([...state.rows.values()]),/x{32}/);
+});
+test('default decoder still rejects excessive declared frame sizes before allocating a body',()=>{
+ const decoder=new FrameDecoder(()=>assert.fail('No oversized message should be delivered'));
+ const header=Buffer.alloc(4);header.writeUInt32LE(1024*1024*1024);
+ assert.throws(()=>decoder.push(header),/frame/i);assert.equal(decoder.body,null);
+});
 test('outbound whitelist refuses task mutation, unknown and malformed subscription messages',()=>{
  assert.throws(()=>validateOutbound({type:'request',method:'turn/start',params:{}}),/read.only/i);
  assert.throws(()=>validateOutbound({type:'broadcast',method:'thread-stream-following-changed',params:{following:'yes'}}));

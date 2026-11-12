@@ -1,5 +1,7 @@
 'use strict';
-const MAX_BYTES=64*1024*1024;
+// Loaded Codex histories can exceed 64 MiB. Keep a finite wire-frame limit;
+// MonitorState separately bounds the metadata retained after decoding.
+const MAX_BYTES=256*1024*1024;
 function encode(message){const body=Buffer.from(JSON.stringify(message));const out=Buffer.allocUnsafe(4+body.length);out.writeUInt32LE(body.length);body.copy(out,4);return out;}
 class FrameDecoder{
  constructor(onMessage,{maxBytes=MAX_BYTES}={}){this.onMessage=onMessage;this.maxBytes=maxBytes;this.header=Buffer.alloc(4);this.headerUsed=0;this.body=null;this.used=0;}
