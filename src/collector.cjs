@@ -1,6 +1,6 @@
 'use strict';
 const net=require('node:net');const {randomUUID}=require('node:crypto');
-const {encode,FrameDecoder,validateOutbound}=require('./protocol.cjs');
+const {encode,FrameDecoder,validateOutbound,supportsStreamVersion}=require('./protocol.cjs');
 const {normalizeDirectory}=require('./state.cjs');
 class Collector{
  constructor(state,{endpoint='\\\\.\\pipe\\codex-ipc',retryMs=500,removeAfterMs=10000,maxFrameBytes,recoveryMs=30000}={}){
@@ -112,7 +112,7 @@ class Collector{
     const resyncKey=message.sourceClientId+':'+p.conversationId;clearTimeout(this.resyncs.get(resyncKey));this.resyncs.delete(resyncKey);
     clearTimeout(this.removals.get(message.sourceClientId));this.removals.delete(message.sourceClientId);
    }
-   if(accepted&&message.version===11){
+   if(accepted&&supportsStreamVersion(message.version)){
     const row=this.state.snapshot().rows.find(value=>value.ownerClientId===message.sourceClientId&&value.threadId===p.conversationId);
     if(row)this.checkMapping(p,message.sourceClientId,row.cwd);
    }

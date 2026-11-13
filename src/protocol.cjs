@@ -2,6 +2,8 @@
 // Loaded Codex histories can exceed 64 MiB. Keep a finite wire-frame limit;
 // MonitorState separately bounds the metadata retained after decoding.
 const MAX_BYTES=256*1024*1024;
+const STREAM_VERSIONS=Object.freeze([11,13]);
+const supportsStreamVersion=version=>STREAM_VERSIONS.includes(version);
 function encode(message){const body=Buffer.from(JSON.stringify(message));const out=Buffer.allocUnsafe(4+body.length);out.writeUInt32LE(body.length);body.copy(out,4);return out;}
 class FrameDecoder{
  constructor(onMessage,{maxBytes=MAX_BYTES,streaming=false}={}){this.onMessage=onMessage;this.maxBytes=maxBytes;this.streaming=streaming;this.header=Buffer.alloc(4);this.headerUsed=0;this.body=null;this.remaining=0;this.used=0;}
@@ -40,4 +42,4 @@ function validateOutbound(m){
  }else fail();
  return true;
 }
-module.exports={encode,FrameDecoder,validateOutbound};
+module.exports={encode,FrameDecoder,validateOutbound,STREAM_VERSIONS,supportsStreamVersion};

@@ -57,6 +57,14 @@ test('same directory instances remain distinct, and disconnect invalidates both'
  assert.equal(state.snapshot().rows.length,2);assert.ok(state.snapshot().rows.every(r=>r.mapping==='ambiguous'));
  state.disconnected('offline');assert.ok(state.snapshot().rows.every(r=>r.status==='unknown'));
 });
+test('audited stream versions 11 and 13 coexist while unaudited versions remain unknown',()=>{
+ const state=new MonitorState();state.connected();state.ingest(snap('legacy'));
+ state.ingest({...snap('modern',{type:'active',activeFlags:[]}),version:13});
+ assert.equal(state.snapshot().rows.find(row=>row.ownerClientId==='modern').status,'busy');assert.equal(state.windowSnapshot().rows.length,2);
+ state.ingest({...patch(1,2,{type:'active',activeFlags:['waitingOnApproval']},'modern'),version:13});assert.equal(state.snapshot().rows.find(row=>row.ownerClientId==='modern').status,'attention');
+ state.ingest({...snap('unsupported'),version:12});const unsupported=state.snapshot().rows.find(row=>row.ownerClientId==='unsupported');
+ assert.equal(unsupported.status,'unknown');assert.match(unsupported.reason,/12/);assert.match(unsupported.reason,/11.*13/);
+});
 test('revision gap cannot resurrect idle through later patches',()=>{
  const state=new MonitorState();state.connected();state.ingest(snap('owner',{type:'active'},1));
  let resync=0;state.on('resync',()=>resync++);

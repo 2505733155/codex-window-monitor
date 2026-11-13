@@ -70,10 +70,10 @@ test('real pipe discovery, read-only subscriptions, resync and reconnect',async 
  assert.ok(sent.every(m=>m.type!=='request'||['initialize','thread-owner-discovery','ide-context'].includes(m.method)));
 });
 
-async function reconnectFixture(t){
+async function reconnectFixture(t,{version=11}={}){
  const endpoint=process.platform==='win32'?'\\\\.\\pipe\\codex-reconcile-test-'+randomUUID():path.join(os.tmpdir(),'codex-'+randomUUID()+'.sock');
  const state=new MonitorState(),sockets=new Set();
- const fixture={state,announced:['closed','live','slow'],snapshots:new Set(['closed','live','slow']),initialize:true,removeAfterMs:120};
+ const fixture={state,version,announced:['closed','live','slow'],snapshots:new Set(['closed','live','slow']),initialize:true,removeAfterMs:120};
  const owner=thread=>'owner-'+thread;
  const server=net.createServer(socket=>{
   fixture.socket=socket;sockets.add(socket);socket.on('close',()=>sockets.delete(socket));
@@ -89,7 +89,7 @@ async function reconnectFixture(t){
    }
    if(message.type==='broadcast'&&message.params.following&&fixture.snapshots.has(message.params.conversationId)){
     const thread=message.params.conversationId;
-    send({type:'broadcast',method:'thread-stream-state-changed',version:11,sourceClientId:owner(thread),params:{hostId:'local',conversationId:thread,change:{type:'snapshot',revision:1,conversationState:{cwd:'D:\\fixture-'+thread,threadRuntimeStatus:{type:'idle'}}}}});
+    send({type:'broadcast',method:'thread-stream-state-changed',version:fixture.version,sourceClientId:owner(thread),params:{hostId:'local',conversationId:thread,change:{type:'snapshot',revision:1,conversationState:{cwd:'D:\\fixture-'+thread,threadRuntimeStatus:{type:'idle'}}}}});
    }
   });socket.on('data',chunk=>decoder.push(chunk));
  });
@@ -110,6 +110,10 @@ test('reconnect reconciliation removes undiscovered old rows but keeps announced
  assert.equal(state.snapshot().rows.find(row=>row.threadId==='slow').status,'unknown','an announcement is enough; slow snapshots must not hide real windows');
  assert.equal(state.windowSnapshot().rows.find(row=>row.id===live.id).blocked,true);
  assert.equal(state.windowSnapshot().rows.find(row=>row.id===live.id).blockReason,'fixture note');
+});
+test('version 13 snapshots receive IDE mapping and recover alongside version 11 support',async t=>{
+ const f=await reconnectFixture(t,{version:13});await until(f.state,()=>f.state.snapshot().rows.every(row=>row.status==='idle'&&row.ideClientId==='ide'));
+ f.version=11;await f.reconnect();await until(f.state,()=>f.state.snapshot().rows.every(row=>row.status==='idle'&&row.ideClientId==='ide'));
 });
 
 test('reconnect reconciliation is cancelled during another disconnect and on stop',async t=>{

@@ -16,6 +16,12 @@ test('streamed snapshots preserve status and questions while discarding chat, re
  }
  assert.equal(state.windowSnapshot().rows[0].pendingInputCount,0);
 });
+test('version 13 streaming keeps pending questions and clears accepted replies',()=>{
+ const state=new MonitorState();state.connected();state.ingest(decode({...snapshot,version:13},true).out[0]);
+ assert.equal(state.windowSnapshot().rows[0].pendingInputCount,1);assert.equal(state.windowSnapshot().rows[0].inputSync,'complete');
+ state.ingest(decode({...snapshot,version:13,params:{...snapshot.params,change:{type:'patches',baseRevision:1,revision:2,patches:[{op:'add',path:['turnHistory','history','entitiesByKey','turn','items','-'],value:{type:'userMessage',content:[{type:'text',text:replyText}]}}]}}},true).out[0]);
+ assert.equal(state.windowSnapshot().rows[0].status,'busy');assert.equal(state.windowSnapshot().rows[0].pendingInputCount,0);
+});
 test('streaming consumes a large irrelevant string without a whole-frame buffer and aligns following frames',()=>{
  const out=[],decoder=new FrameDecoder(m=>out.push(m),{streaming:true});
  const prefix=Buffer.from('{"type":"broadcast","params":{"ignored":"'),suffix=Buffer.from('","hostId":"local"}}'),chunk=Buffer.alloc(1024*1024,120),header=Buffer.alloc(4);

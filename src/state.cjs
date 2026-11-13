@@ -2,6 +2,7 @@
 const {EventEmitter}=require('node:events');
 const path=require('node:path');
 const {InputState}=require('./input-state.cjs');
+const {STREAM_VERSIONS,supportsStreamVersion}=require('./protocol.cjs');
 function normalizeDirectory(cwd){
  if(!cwd)return '';
  let value=path.win32.normalize(cwd);const root=path.win32.parse(value).root;
@@ -82,7 +83,7 @@ class MonitorState extends EventEmitter{
    if(previouslySynced)this.emit('resync',{ownerClientId:row.ownerClientId,hostId:row.hostId,threadId:row.threadId});
    return false;
   };
-  if(m.version!==11){row.synced=false;this.unknown(row,'Codex 协议版本不兼容');this.changed();return;}
+  if(!supportsStreamVersion(m.version)){row.synced=false;const actual=Number.isSafeInteger(m.version)&&m.version>=0?m.version:'未知';this.unknown(row,'Codex 协议版本不兼容（收到 '+actual+'，支持 '+STREAM_VERSIONS.join('、')+'）');this.changed();return;}
   const before=row.status;
   if(c.type==='snapshot'){
    if(!Number.isSafeInteger(c.revision)||c.revision<0||!c.conversationState||typeof c.conversationState!=='object')return invalidate('无效的会话快照');
