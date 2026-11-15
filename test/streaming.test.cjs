@@ -5,6 +5,20 @@ const question={type:'agentMessage',id:'call_fixture',delivery:'async',questions
 const replyText='<send_user_message_question_reply>'+JSON.stringify([{questionItemId:'["request_user_input_async","call_fixture",0]',question:'SECRET QUESTION',answer:'SECRET ANSWER'}])+'</send_user_message_question_reply>';
 const snapshot={type:'broadcast',method:'thread-stream-state-changed',version:11,sourceClientId:'owner',params:{hostId:'local',conversationId:'thread',change:{type:'snapshot',revision:1,conversationState:{cwd:'D:/fixture/中文',threadRuntimeStatus:{type:'active',activeFlags:[]},turns:[{output:'SECRET OUTPUT'}],turnHistory:{kind:'canonical',history:{isComplete:true,entitiesByKey:{turn:{rootTurnId:'root',params:{input:[{type:'text',text:'SECRET USER REQUEST'}]},items:[{type:'reasoning',id:'reason',content:[{type:'text',text:'SECRET REASONING'}]},question]}},islands:[{entries:[{key:'turn',value:'turn'}],newerBoundary:{status:'exhausted'}}]}}}}}};
 function decode(message,bytewise=false){const out=[];const decoder=new FrameDecoder(m=>out.push(m),{streaming:true});const bytes=encode(message);if(bytewise)for(const byte of bytes)decoder.push(Buffer.from([byte]));else decoder.push(bytes);return {out,decoder};}
+
+test('streamed current coverage ignores older pages but preserves item pagination updates',()=>{
+ const message=structuredClone(snapshot),history=message.params.change.conversationState.turnHistory.history;
+ history.isComplete=false;history.entitiesByKey.turn.turnId='root';
+ history.entitiesByKey.turn.itemsPagination={hasLoadedOldest:true};
+ for(const version of [11,13]){
+  const state=new MonitorState();state.connected();state.ingest(decode({...message,version},true).out[0]);
+  assert.equal(state.windowSnapshot().rows[0].inputSync,'complete');
+  for(const [index,value]of [false,true].entries()){
+   const update={...message,version,params:{...message.params,change:{type:'patches',baseRevision:index+1,revision:index+2,patches:[{value,path:'/turnHistory/history/entitiesByKey/turn/itemsPagination/hasLoadedOldest',op:'replace'}]}}};
+   state.ingest(decode(update,true).out[0]);assert.equal(state.windowSnapshot().rows[0].inputSync,value?'complete':'partial');
+  }
+ }
+});
 test('streamed snapshots preserve status and questions while discarding chat, reasoning and output',()=>{
  const {out}=decode(snapshot,true);assert.equal(out.length,1);assert.doesNotMatch(JSON.stringify(out),/SECRET/);
  const state=new MonitorState({clock:()=>1000});state.connected();state.ingest(out[0]);const row=state.windowSnapshot().rows[0];

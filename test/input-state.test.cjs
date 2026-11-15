@@ -143,3 +143,28 @@ test('confirmed new request supersedes uncertainty in older interaction boundari
  const p=new InputState();p.snapshot(scopedState({first:{rootTurnId:'old',items:[question]},incomplete:{rootTurnId:'incomplete',items:[]},current:{rootTurnId:'current',params:{input:[{type:'text',text:'NEW TASK'}]},items:[]}}));
  assert.deepEqual(p.summary(),{pendingInputCount:0,inputSync:'complete'});
 });
+
+test('complete current interaction does not depend on older history being loaded',()=>{
+ const p=new InputState();
+ const current={turnId:'current',rootTurnId:'current',params:{input:[{type:'text',text:'NEW TASK'}]},itemsPagination:{hasLoadedOldest:true},items:[question,reply()]};
+ p.snapshot(scopedState({old:{rootTurnId:'old',items:[question],itemsPagination:{hasLoadedOldest:false}},current},['old','current'],false));
+ assert.deepEqual(p.summary(),{pendingInputCount:1,inputSync:'complete'});
+ p.patch(['turnHistory','history','entitiesByKey','current','itemsPagination','hasLoadedOldest'],'replace',false);
+ assert.equal(p.summary().inputSync,'partial');
+ p.patch(['turnHistory','history','entitiesByKey','current','itemsPagination','hasLoadedOldest'],'replace',true);
+ assert.equal(p.summary().inputSync,'complete');
+});
+
+test('current interaction needs its ordinary request and every root start when older history is partial',()=>{
+ const p=new InputState();
+ const first={turnId:'first',rootTurnId:'first',params:{input:[{type:'text',text:'NEW TASK'}]},items:[question]};
+ const next={turnId:'next',rootTurnId:'next',params:{input:reply().input},items:[reply()]};
+ p.snapshot(scopedState({first,next},['first','next'],false));
+ assert.deepEqual(p.summary(),{pendingInputCount:1,inputSync:'complete'});
+ const missingInput={...first};delete missingInput.params;
+ for(const entity of [{...first,turnId:'continuation'},{...first,params:{input:reply().input}},missingInput]){
+  p.snapshot(scopedState({entity},['entity'],false));assert.equal(p.summary().inputSync,'partial');
+ }
+ p.snapshot(scopedState({first,next:{...next,turnId:'continuation'}},['first','next'],false));assert.equal(p.summary().inputSync,'partial');
+ p.snapshot(scopedState({first:{...first,itemsPagination:{hasLoadedOldest:false}}}));assert.equal(p.summary().inputSync,'partial');
+});

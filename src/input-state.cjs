@@ -5,7 +5,7 @@ const LIMIT=30000,ARRAY_LIMIT=10000;
 const REPLY_METADATA=Symbol('monitor-reply-metadata');
 const inputSchema=[{type:'type',text:'reply'}];
 const itemSchema={type:'type',id:'id',delivery:'delivery',questions:['question'],status:'status',steerAcknowledged:'boolean',input:[{type:'type',text:'reply'}],content:[{type:'type',text:'reply'}]};
-const schema={history:{isComplete:'boolean',entitiesByKey:{$map:{inherited:'boolean',isInherited:'boolean',rootTurnId:'id',turnId:'id',params:{input:inputSchema},items:[itemSchema]}},islands:[{entries:[{key:'id'}],newerBoundary:{status:'boundary'}}]}};
+const schema={history:{isComplete:'boolean',entitiesByKey:{$map:{inherited:'boolean',isInherited:'boolean',rootTurnId:'id',turnId:'id',params:{input:inputSchema},itemsPagination:{hasLoadedOldest:'boolean'},items:[itemSchema]}},islands:[{entries:[{key:'id'}],newerBoundary:{status:'boundary'}}]}};
 const messageFields={agentMessage:['type','id','delivery','questions'],userMessage:['type','content','input'],steeringUserMessage:['type','status','steerAcknowledged','input','content']};
 const fieldsFor=type=>Object.hasOwn(messageFields,type)?messageFields[type]:null;
 const own=(object,key)=>object!=null&&Object.hasOwn(object,key);
@@ -151,6 +151,18 @@ class InputState{
   }
   return uncertain?null:ordered.filter(entity=>roots.has(entity.rootTurnId||entity.turnId));
  }
+ currentComplete(history,current){
+  if(!current||current.some(entity=>entity.itemsPagination?.hasLoadedOldest===false))return false;
+  if(history.isComplete===true)return true;
+  // Older pages are irrelevant once the ordinary request starting this
+  // interaction and the start of every continued/reply root are present.
+  const starts=new Map(current.filter(entity=>entity.turnId&&entity.turnId===entity.rootTurnId).map(entity=>[entity.rootTurnId,entity]));
+  if(!current.length||current.some(entity=>!starts.has(entity.rootTurnId||entity.turnId)))return false;
+  const first=starts.get(current[0].rootTurnId||current[0].turnId);
+  const user=first.items?.find(item=>item?.type==='userMessage');
+  const parts=first.params?.input?.length?first.params.input:user?.input||user?.content||[];
+  return parts.length>0&&!parts.every(part=>part?.type==='text'&&part.text?.ids?.length&&!part.text.invalid);
+ }
  summary(){
   if(this.cached)return this.cached;
   const pending=new Set(),answered=new Set();let invalid=this.invalid;
@@ -171,7 +183,7 @@ class InputState{
    }
   }
   for(const id of answered)pending.delete(id);
-  return this.cached={pendingInputCount:pending.size,inputSync:invalid||!history?'unknown':history.isComplete===true?'complete':'partial'};
+  return this.cached={pendingInputCount:pending.size,inputSync:invalid||!history?'unknown':this.currentComplete(history,current)?'complete':'partial'};
  }
 }
 module.exports={InputState,compactReply,fieldsFor,itemProjection:itemSchema,historyProjection:{kind:'type',...schema}};
