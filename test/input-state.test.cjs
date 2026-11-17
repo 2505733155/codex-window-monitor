@@ -57,12 +57,13 @@ test('oversized question arrays are unconfirmed and root replacement clears stal
  h.patch(['turnHistory','history','entitiesByKey','tail/0','items',1,'steerAcknowledged'],true,'add');assert.equal(h.row().pendingInputCount,1);
  h.patch([], {cwd:'D:/fixture',threadRuntimeStatus:{type:'idle'}});assert.equal(h.row().awaitingInput,false);assert.equal(h.row().inputSync,'unknown');
 });
-test('pending counts aggregate by owner and host while revision gaps invalidate their own session',()=>{
+test('pending counts aggregate by viewing panel while revision gaps invalidate their own session',()=>{
  const h=harness();
+ h.state.setViewers('local','thread',['panel']);h.state.setViewers('local','second',['panel']);
  const conversationState={cwd:'D:/other',threadRuntimeStatus:{type:'idle'},turnHistory:{kind:'canonical',history:{isComplete:true,entitiesByKey:{turn:{rootTurnId:'second-root',items:[{...question,id:'second-call'}]}},islands:[{entries:[{key:'turn'}],newerBoundary:{status:'exhausted'}}]}}};
  const second={type:'broadcast',method:'thread-stream-state-changed',version:11,sourceClientId:'owner',params:{hostId:'local',conversationId:'second',change:{type:'snapshot',revision:1,conversationState}}};
  h.state.ingest(second);assert.equal(h.row().sessionCount,2);assert.equal(h.row().pendingInputCount,4);assert.equal(h.row().status,'busy');
- h.state.ingest({...second,sourceClientId:'separate'});assert.equal(h.state.windowSnapshot().rows.length,2);
+ h.state.ingest({...second,sourceClientId:'separate',params:{...second.params,conversationId:'separate-thread'}});assert.equal(h.state.windowSnapshot().rows.length,2);
  h.state.ingest({...second,params:{...second.params,change:{type:'patches',baseRevision:3,revision:4,patches:[]}}});
  assert.equal(h.row().status,'busy');assert.equal(h.row().pendingInputCount,2);assert.equal(h.row().inputSync,'unknown');
 });

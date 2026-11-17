@@ -126,3 +126,15 @@ test('ambiguous windows remain searchable by every member project name and direc
  for(const query of ['fixture-current','d:/fixture-history']){page.nodes.get('search').value=query;page.nodes.get('search').listeners.input();assert.ok(page.all().some(node=>node.dataset?.duration===row.id),query);}
  page.nodes.get('search').value='no-such-project';page.nodes.get('search').listeners.input();assert.ok(!page.all().some(node=>node.dataset?.duration===row.id));
 });
+
+test('viewing panels label shared sessions and keep unknown window association explicit',()=>{
+ const page=browser();page.send([{...sampleRow,id:'panel:view:local',viewClientId:'viewer',displayKind:'panel',sharedSessionCount:1},
+  {...sampleRow,id:'session:orphan',displayKind:'unassigned',name:'orphan'}]);
+ const text=page.nodes.get('rows').textContent;assert.match(text,/首次前往时选择窗口/);assert.match(text,/1 个共享会话/);assert.match(text,/窗口归属待确认/);
+ assert.match(page.nodes.get('showing').textContent,/面板或待归属会话/);
+});
+
+test('multi-project panels expose their session projects in the main list',()=>{
+ const page=browser();page.send([{...sampleRow,name:'多项目面板',cwd:'',projectAmbiguous:true,displayKind:'panel',viewClientId:'viewer',sessions:[{...sampleRow,name:'project-workboard-repo'},{...sampleRow,name:'Temp'}]}]);
+ const text=page.nodes.get('rows').textContent;assert.match(text,/project-workboard-repo/);assert.match(text,/Temp/);
+});

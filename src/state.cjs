@@ -32,7 +32,7 @@ function inputSummary(row,connection){
   inputSync:waiting&&!input.pendingInputCount&&input.inputSync==='complete'?'partial':input.inputSync};
 }
 class MonitorState extends EventEmitter{
- constructor({clock=Date.now}={}){super();this.clock=clock;this.rows=new Map();this.windowTimings=new Map();this.windowBlocks=new Map();this.connection='connecting';this.connectionReason='正在连接 Codex';this.sequence=0;}
+ constructor({clock=Date.now}={}){super();this.clock=clock;this.rows=new Map();this.viewers=new Map();this.windowTimings=new Map();this.windowBlocks=new Map();this.connection='connecting';this.connectionReason='正在连接 Codex';this.sequence=0;}
  changed(){this.sequence++;this.windowSnapshot();this.emit('change',this.snapshot());}
  connected(){this.connection='connected';this.connectionReason='已连接 Codex';this.changed();}
  collectionError(error){
@@ -51,7 +51,20 @@ class MonitorState extends EventEmitter{
  unknown(row,reason){if(row.status!=='unknown'){row.since=this.clock();row.sinceKnown=false;}row.status='unknown';row.reason=reason;}
  clientGone(clientId){for(const row of this.rows.values())if(row.ownerClientId===clientId){row.synced=false;this.unknown(row,'Codex 面板已断开');}this.changed();}
  removeClient(clientId){for(const [id,row]of this.rows)if(row.ownerClientId===clientId)this.rows.delete(id);this.changed();}
- removeThread(threadId,exceptOwner){for(const [id,row]of this.rows)if(row.threadId===threadId&&row.ownerClientId!==exceptOwner)this.rows.delete(id);this.changed();}
+ removeThread(threadId,exceptOwner){for(const [id,row]of this.rows)if(row.threadId===threadId&&row.ownerClientId!==exceptOwner)this.rows.delete(id);if(exceptOwner===undefined)this.viewers.delete('local:'+threadId);this.changed();}
+ setViewers(hostId,threadId,clientIds){
+  if(hostId!=='local'||typeof threadId!=='string'||threadId.length>200)return;
+  const viewers=new Set(clientIds.filter(id=>typeof id==='string'&&id.length>0&&id.length<=200));
+  this.viewers.set(hostId+':'+threadId,viewers);this.changed();
+ }
+ removeViewer(clientId){
+  for(const viewers of this.viewers.values())viewers.delete(clientId);
+  this.windowBlocks.delete('panel:'+clientId+':local');this.changed();
+ }
+ reconcileViewers(){
+  const live=new Set([...this.viewers.values()].flatMap(ids=>[...ids]).map(id=>'panel:'+id+':local'));
+  for(const id of this.windowBlocks.keys())if(id.startsWith('panel:')&&!live.has(id))this.windowBlocks.delete(id);
+ }
  setDirectory(row,cwd){
   const next=typeof cwd==='string'?cwd.slice(0,4096):'';
   if(normalizeDirectory(row.cwd)!==normalizeDirectory(next))row.ideClientId=null;
@@ -126,10 +139,20 @@ class MonitorState extends EventEmitter{
  }
  windowSnapshot(){
   // Keep per-thread snapshots intact for collector ownership and revision checks.
-  const snapshot=this.snapshot(),groups=new Map(),now=this.clock();
+  const snapshot=this.snapshot(),groups=new Map(),viewClients=new Map(),now=this.clock();
+  const add=(id,row,viewer=null)=>{if(!groups.has(id))groups.set(id,[]);groups.get(id).push(row);viewClients.set(id,viewer);};
+  const assigned=new Set();
+  for(const [key,viewers]of this.viewers){
+   if(!viewers.size)continue;
+   const members=snapshot.rows.filter(row=>row.hostId+':'+row.threadId===key);
+   const threadId=key.slice(6);
+   // Keep the viewing panel visible while ownership changes or a snapshot
+   // is still missing. This placeholder never confirms execution status.
+   if(!members.length)members.push({id:'pending:'+key,ownerClientId:'',hostId:'local',threadId,cwd:'',name:'待识别会话',status:'unknown',reason:'等待会话拥有者的完整快照',since:now,sinceKnown:false,lastSeen:null,pendingInputCount:0,awaitingInput:false,inputSync:'unknown'});
+   for(const viewer of viewers)for(const row of members){add('panel:'+viewer+':local',row,viewer);assigned.add(row.id);}
+  }
   for(const row of snapshot.rows){
-   const id='window:'+row.ownerClientId+':'+row.hostId;
-   if(!groups.has(id))groups.set(id,[]);groups.get(id).push(row);
+   if(!assigned.has(row.id))add('session:'+row.id,row);
   }
   const rows=[];const directory=row=>normalizeDirectory(row.cwd);
   for(const [id,members]of groups){
@@ -138,8 +161,8 @@ class MonitorState extends EventEmitter{
    const candidates=members.filter(row=>row.status===status).sort((a,b)=>(b.lastSeen||0)-(a.lastSeen||0)||a.id.localeCompare(b.id));
    const representative=candidates[0]||members[0];
    // Project identity is independent of whichever session currently drives the status.
-   const projects=members.filter(row=>row.cwd),verified=projects.filter(row=>row.ideClientId);
-   const identityCandidates=verified.length?verified:projects;
+   const projects=members.filter(row=>row.cwd);
+   const identityCandidates=projects;
    const projectAmbiguous=new Set(identityCandidates.map(directory)).size>1;
    const project=projectAmbiguous?null:identityCandidates.sort((a,b)=>a.id.localeCompare(b.id))[0]||representative;
    let timing=this.windowTimings.get(id);
@@ -153,16 +176,20 @@ class MonitorState extends EventEmitter{
    const reason=members.length===1?representative.reason:members.length+' 个会话：'+Object.keys(counts).filter(key=>counts[key]).map(key=>counts[key]+' '+labels[key]).join('，');
    const pendingInputCount=members.reduce((sum,row)=>sum+row.pendingInputCount,0),awaitingInput=members.some(row=>row.awaitingInput);
    const inputSync=members.every(row=>row.inputSync==='complete')?'complete':members.some(row=>row.inputSync==='unknown')?'unknown':'partial';
-   const sessions=members.map(row=>({id:row.id,threadId:row.threadId,cwd:row.cwd,name:row.name,status:row.status,reason:row.reason,since:row.since,sinceKnown:row.sinceKnown,lastSeen:row.lastSeen,pendingInputCount:row.pendingInputCount,awaitingInput:row.awaitingInput,inputSync:row.inputSync}));
+   const sessions=members.map(row=>({id:row.id,threadId:row.threadId,cwd:row.cwd,name:row.name,status:row.status,reason:row.reason,since:row.since,sinceKnown:row.sinceKnown,lastSeen:row.lastSeen,pendingInputCount:row.pendingInputCount,awaitingInput:row.awaitingInput,inputSync:row.inputSync,shared:(this.viewers.get(row.hostId+':'+row.threadId)?.size||0)>1}));
    const ideClientId=project?.ideClientId||null;
-   rows.push({...representative,id,name:project?.name||'多项目窗口',cwd:project?.cwd||'',projectAmbiguous,blocked:this.windowBlocks.has(id),blockReason:this.windowBlocks.get(id)||'',status,reason,since:timing.since,sinceKnown:timing.sinceKnown,ideClientId,lastSeen:Math.max(...members.map(row=>row.lastSeen||0))||null,sessionCount:sessions.length,sessions,pendingInputCount,awaitingInput,inputSync});
+   const viewClientId=viewClients.get(id),sharedSessionCount=sessions.filter(row=>row.shared).length;
+   rows.push({...representative,id,viewClientId,displayKind:viewClientId?'panel':'unassigned',requiresWindowSelection:true,sharedSessionCount,name:project?.name||'多项目面板',cwd:project?.cwd||'',projectAmbiguous,blocked:this.windowBlocks.has(id),blockReason:this.windowBlocks.get(id)||'',status,reason,since:timing.since,sinceKnown:timing.sinceKnown,ideClientId,lastSeen:Math.max(...members.map(row=>row.lastSeen||0))||null,sessionCount:sessions.length,sessions,pendingInputCount,awaitingInput,inputSync});
   }
   for(const id of this.windowTimings.keys())if(!groups.has(id))this.windowTimings.delete(id);
-  for(const id of this.windowBlocks.keys())if(!groups.has(id))this.windowBlocks.delete(id);
+  // An empty panel may just be switching conversations. Explicit client
+  // disconnects (or reconnect reconciliation) clear its in-memory mark.
+  for(const id of this.windowBlocks.keys())if(!groups.has(id)&&!id.startsWith('panel:'))this.windowBlocks.delete(id);
   const counts=new Map();
   for(const row of rows){const key=directory(row);if(key)counts.set(key,(counts.get(key)||0)+1);}
-  for(const row of rows)row.mapping=row.projectAmbiguous||counts.get(directory(row))>1?'ambiguous':row.ideClientId?'project-match':'unconfirmed';
-  return {...snapshot,sessionCount:snapshot.rows.length,rows};
+  for(const row of rows)row.mapping=row.projectAmbiguous||counts.get(directory(row))>1?'ambiguous':'unconfirmed';
+  const sessionCount=new Set([...groups.values()].flatMap(members=>members.map(row=>row.hostId+':'+row.threadId))).size;
+  return {...snapshot,sessionCount,rows};
  }
  snapshot(){
   const counts=new Map();for(const row of this.rows.values()){const key=row.cwd.toLowerCase();counts.set(key,(counts.get(key)||0)+1);}

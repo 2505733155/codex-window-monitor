@@ -5,13 +5,14 @@ const {randomUUID}=require('node:crypto');
 
 function problem(message,status=409){return Object.assign(new Error(message),{status});}
 const identity=window=>window.Handle+':'+window.ProcessId+':'+window.ProcessStarted;
+const scope=row=>row.viewClientId?row.id:row.cwd;
 const matches=(window,name)=>{
  const title=window.Title.replace(/^[\u25cf\u2022]\s*/, '').toLowerCase();
  const suffix=name.toLowerCase()+' - visual studio code';
  return title===suffix||title.endsWith(' - '+suffix);
 };
 // Unmatched/custom titles need an exact guard, not a guessed workspace name.
-const association=(window,row)=>({cwd:row.cwd,identity:identity(window),projectName:matches(window,row.name)?row.name:null,title:window.Title});
+const association=(window,row)=>({scope:scope(row),identity:identity(window),projectName:matches(window,row.name)?row.name:null,title:window.Title});
 const stillAssociated=(window,value)=>identity(window)===value.identity&&(value.projectName?matches(window,value.projectName):window.Title===value.title);
 
 class WindowNavigator{
@@ -41,29 +42,29 @@ class WindowNavigator{
    const {windows}=await this.native({action:'list'});
    if(!Array.isArray(windows)||!windows.length)throw problem('没有找到可前往的 VS Code 窗口，请确认窗口仍然打开',404);
    const current=this.getSnapshot().rows.find(value=>value.id===row.id);
-   if(!current||current.cwd!==row.cwd)throw problem('实例或项目目录已变化，请重新点击',409);
+   if(!current||scope(current)!==scope(row))throw problem('实例或项目目录已变化，请重新点击',409);
    for(const [key,value]of this.choices)if(value.expires<Date.now())this.choices.delete(key);
    for(const key of this.bindings.keys())if(!this.getSnapshot().rows.some(value=>value.id===key))this.bindings.delete(key);
    let target;
    if(choiceId){
     const choice=this.choices.get(choiceId);
-    if(!choice||choice.rowId!==rowId||choice.cwd!==row.cwd)throw problem('窗口选择已过期，请重新点击“前往窗口”',409);
+    if(!choice||choice.rowId!==rowId||choice.scope!==scope(row))throw problem('窗口选择已过期，请重新点击“前往窗口”',409);
     target=windows.find(window=>stillAssociated(window,choice));
     if(!target)throw problem('窗口已关闭或切换项目，请重新点击“前往窗口”',409);
    }else{
     const binding=this.bindings.get(rowId);
-    if(binding?.cwd===row.cwd)target=windows.find(window=>stillAssociated(window,binding));
+    if(binding?.scope===scope(row))target=windows.find(window=>stillAssociated(window,binding));
     if(!target){
      const candidates=windows.filter(window=>row.name&&matches(window,row.name));
      const sameNameRows=this.getSnapshot().rows.filter(value=>value.name.toLowerCase()===row.name.toLowerCase());
-     if(candidates.length===1&&sameNameRows.length===1&&row.mapping!=='ambiguous')target=candidates[0];
+     if(!row.requiresWindowSelection&&candidates.length===1&&sameNameRows.length===1&&row.mapping!=='ambiguous')target=candidates[0];
      else{
       for(const [key,value]of this.choices)if(value.rowId===rowId)this.choices.delete(key);
-      const options=(candidates.length?candidates:windows).map(window=>{
+      const options=(row.requiresWindowSelection?windows:candidates.length?candidates:windows).map(window=>{
        const choiceId=randomUUID();this.choices.set(choiceId,{rowId,...association(window,row),expires:Date.now()+120000});
        return {choiceId,title:window.Title,desktop:window.DesktopLabel,current:window.OnCurrentDesktop,minimized:window.Minimized};
       });
-      return {status:'choose',reason:candidates.length?'存在多个可能的窗口，请选择要前往的窗口。':'未能按项目名称唯一定位，请选择对应的 VS Code 窗口。',windows:options};
+      return {status:'choose',reason:row.requiresWindowSelection?'面板尚未绑定原生窗口；会话项目可能与窗口项目不同，请选择对应的 VS Code 窗口。':candidates.length?'存在多个可能的窗口，请选择要前往的窗口。':'未能按项目名称唯一定位，请选择对应的 VS Code 窗口。',windows:options};
      }
     }
    }

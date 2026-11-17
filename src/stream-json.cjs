@@ -9,7 +9,7 @@ const elementShape={...itemProjection,text:'reply',entries:islandShape.entries,n
 const commonElementFields=['type','text','entries','newerBoundary','key'];
 const envelope={type:'type',method:'id',version:'number',sourceClientId:'id',requestId:'id',resultType:'type',handledByClientId:'id',error:'path',
  result:{clientId:'id',supportsUntrustedAppInput:'boolean',ideContext:{}},
- params:{hostId:'id',conversationId:'id',clientId:'id',status:'type',following:'boolean',change:{type:'type',revision:'number',baseRevision:'number',conversationState:conversation,patches:[PATCH]}}};
+ params:{hostId:'id',conversationId:'id',clientId:'id',clientType:'id',status:'type',following:'boolean',change:{type:'type',revision:'number',baseRevision:'number',conversationState:conversation,patches:[PATCH]}}};
 const union=Object.create(null);
 function collect(shape){if(Array.isArray(shape)){collect(shape[0]);return;}if(!shape||typeof shape!=='object')return;for(const [key,value]of Object.entries(shape)){if(key!=='$map'){union[key]=value;collect(value);}else collect(value);}}
 collect(conversation);
