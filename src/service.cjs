@@ -44,7 +44,7 @@ async function startService({runtimeDir=defaultDir,port=0,endpoint,startupTimeou
   })();return closePromise;
  }
  try{
-  navigator=new WindowNavigator(()=>state.windowSnapshot());
+  navigator=new WindowNavigator(()=>state.windowSnapshot(),(id,cwd)=>state.setPanelWorkspace(id,cwd));
   web=await createWeb(state,{port,instanceId,startupTimeoutMs,idleTimeoutMs,onWindow:value=>navigator.activate(value),onStop:()=>{close().catch(()=>{});}});
   const info={app:'codex-window-monitor',version:'0.1.0',pid:process.pid,instanceId,port:web.server.address().port,token:web.token,base:web.base,url:web.url,startedAt:new Date().toISOString()};
   const temporary=path.join(runtimeDir,'instance-'+instanceId+'.tmp');

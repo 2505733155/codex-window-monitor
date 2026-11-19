@@ -142,3 +142,45 @@ test('workspace mapping rechecks cwd patches and ignores superseded IDE query re
  currentQuery.respond();await until(state,()=>state.snapshot().rows.find(row=>row.threadId==='live').ideClientId==='ide');
  assert.equal(state.windowSnapshot().rows.find(row=>row.ownerClientId==='owner-live').name,'fixture-newest');
 });
+
+test('pipe viewer subscriptions separate a shared owner, replay on reconnect and release on switching',async t=>{
+ const endpoint=process.platform==='win32'?'\\\\.\\pipe\\codex-panels-'+randomUUID():path.join(os.tmpdir(),'codex-panels-'+randomUUID()+'.sock');
+ const sockets=new Set(),state=new MonitorState();let active,owner='owner';
+ const event=(method,sourceClientId,params,version=1)=>({type:'broadcast',method,sourceClientId,params,version});
+ const announce=(clientId,thread,following=true)=>active.write(encode(event('thread-stream-following-changed',clientId,{hostId:'local',conversationId:thread,following})));
+ const server=net.createServer(socket=>{active=socket;sockets.add(socket);socket.on('close',()=>sockets.delete(socket));
+  const decoder=new FrameDecoder(m=>{
+   if(m.type==='request')socket.write(encode({type:'response',requestId:m.requestId,resultType:'success',handledByClientId:owner,result:m.method==='initialize'?{clientId:'monitor'}:m.method==='ide-context'?{ideContext:{}}:{}}));
+   if(m.method==='initialize'){
+    socket.write(encode(event('client-status-changed','peer-monitor',{clientId:'peer-monitor',clientType:'codex-window-monitor',status:'connected'},0)));
+    announce('peer-monitor','a');announce('panel-a','a');announce('panel-b','b');
+   }
+   if(m.type==='broadcast'&&m.params?.following){const thread=m.params.conversationId;socket.write(encode(event('thread-stream-state-changed',owner,{hostId:'local',conversationId:thread,change:{type:'snapshot',revision:1,conversationState:{cwd:'D:/'+thread,threadRuntimeStatus:{type:thread==='a'?'idle':'active'}}}},13)));}
+  });socket.on('data',chunk=>decoder.push(chunk));
+ });
+ await new Promise(resolve=>server.listen(endpoint,resolve));const collector=new Collector(state,{endpoint,retryMs:10,removeAfterMs:30});
+ t.after(async()=>{collector.stop();for(const socket of sockets)socket.destroy();await new Promise(resolve=>server.close(resolve));});
+ collector.start();await until(state,()=>state.snapshot().rows.length===2&&state.snapshot().rows.every(r=>r.status!=='unknown'));
+ assert.deepEqual(state.windowSnapshot().rows.map(r=>r.viewClientId).sort(),['panel-a','panel-b']);
+ const a=state.windowSnapshot().rows.find(r=>r.viewClientId==='panel-a');state.setBlocked(a.id,true,'fixture');
+ const offline=until(state,()=>state.connection==='disconnected');active.destroy();await offline;
+ await until(state,()=>state.connection==='connected'&&state.snapshot().rows.every(r=>r.status!=='unknown'));
+ assert.equal(state.windowSnapshot().rows.find(r=>r.id===a.id).blocked,true);
+ announce('panel-b','b',false);announce('panel-b','a');
+ await until(state,()=>state.windowSnapshot().rows.length===2&&state.windowSnapshot().rows.every(r=>r.sharedSessionCount===1));
+ assert.equal(state.windowSnapshot().sessionCount,1);assert.equal(state.snapshot().rows.length,1);
+ active.write(encode(event('client-status-changed','panel-b',{clientId:'panel-b',status:'disconnected'},0)));
+ await until(state,()=>state.windowSnapshot().rows.length===1);assert.equal(state.windowSnapshot().rows[0].sharedSessionCount,0);
+ owner='replacement';active.write(encode(event('client-status-changed','owner',{clientId:'owner',status:'disconnected'},0)));
+ await until(state,()=>state.snapshot().rows.length===1&&state.snapshot().rows[0].ownerClientId==='replacement'&&state.snapshot().rows[0].status==='idle');
+ assert.equal(state.windowSnapshot().rows[0].id,a.id);assert.equal(state.windowSnapshot().rows[0].blocked,true);
+});
+
+test('reconnect also removes undiscovered panels that never received a canonical snapshot',async t=>{
+ const f=await reconnectFixture(t);const thread='never-loaded';
+ f.socket.write(encode({type:'broadcast',method:'thread-stream-following-changed',version:1,sourceClientId:'temporary-panel',params:{hostId:'local',conversationId:thread,following:true}}));
+ await until(f.state,()=>f.state.windowSnapshot().rows.some(r=>r.viewClientId==='temporary-panel'));
+ await f.reconnect();
+ await new Promise(resolve=>setTimeout(resolve,f.removeAfterMs*2));
+ assert.ok(!f.state.windowSnapshot().rows.some(r=>r.viewClientId==='temporary-panel'));
+});

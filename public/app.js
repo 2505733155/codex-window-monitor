@@ -14,6 +14,12 @@ function inputNote(row){
  return (count?(sync==='complete'?'':'至少 ')+count+' 个问题待回答':'')+(sync&&sync!=='complete'?(count?' · ':'')+(sync==='partial'?'问题记录未完全同步':'待回答状态未确认'):'');
 }
 function stateNote(row){return [row.reason,inputNote(row)].filter(Boolean).join(' · ');}
+function panelNote(row){
+ if(row.displayKind==='unassigned')return '窗口归属待确认';
+ if(row.displayKind!=='panel')return '';
+ if(row.workspaceMatched)return '已按匹配工作区汇总';
+ return row.requiresWindowSelection?'会话面板 · 前往时选择窗口':'会话面板 · 同名窗口唯一时直接前往';
+}
 function duration(row,precise=false){
  if(row.status==='unknown')return '—';
  const seconds=Math.max(0,Math.floor((Date.now()-row.since)/1000));let text;
@@ -35,10 +41,13 @@ function render(){
  for(const row of visible){
   const tr=element('tr',row.blocked?'blocked-row':''),projectCell=element('td'),project=element('div','project'),folder=element('span','folder','▱'),info=element('div'),name=element('div','project-name',row.name);
   folder.setAttribute('aria-hidden','true');
-  if(row.mapping==='ambiguous')name.append(element('span','short-id',row.ownerClientId.slice(0,6)));
+  if(row.mapping==='ambiguous'||row.displayKind==='panel')name.append(element('span','short-id',(row.viewClientId||row.ownerClientId).slice(0,6)));
   if(row.sessionCount>1)name.append(element('span','session-count',row.sessionCount+' 个会话'));
   if(row.blocked)name.append(element('span','block-tag','已阻塞'));
-  const directory=element('div','project-path',row.cwd||(row.projectAmbiguous?'项目目录待确认，见详情':'目录待识别'));directory.title=row.cwd;info.append(name,directory);
+  const projectText=row.cwd||(row.projectAmbiguous?'会话项目：'+[...new Set((row.sessions||[]).map(session=>session.name).filter(Boolean))].join('、'):'目录待识别');
+  const directory=element('div','project-path',projectText);directory.title=projectText;info.append(name,directory);
+  if(panelNote(row))info.append(element('div','state-note',panelNote(row)));
+  if(row.sharedSessionCount)info.append(element('div','state-note',row.sharedSessionCount+' 个共享会话（其他面板也在查看）'));
   if(row.blocked){const note=element('div','block-note',row.blockReason||'未填写阻塞原因');note.title=row.blockReason||'未填写阻塞原因';info.append(note);}
   project.append(folder,info);projectCell.append(project);
   const statusCell=element('td'),badge=element('span','badge '+row.status+(row.awaitingInput?' awaiting-input':'')),dot=element('i','dot');badge.append(dot,document.createTextNode(statusLabel(row)));statusCell.append(badge,element('div','state-note',stateNote(row)));
@@ -51,7 +60,7 @@ function render(){
   actionCell.append(actions);
   tr.append(projectCell,statusCell,timeCell,actionCell);body.append(tr);
  }
- $('showing').textContent='显示 '+visible.length+' / '+rows.length+' 个已发现窗口 · 共 '+(snapshot.sessionCount??rows.length)+' 个会话';
+ $('showing').textContent='显示 '+visible.length+' / '+rows.length+' 个面板或待归属会话 · 共 '+(snapshot.sessionCount??rows.length)+' 个独立会话';
  $('connection').textContent=linked?(snapshot.connection==='connected'?'● 实时连接':'○ 等待 Codex'):'○ 页面连接中断';
  const diagnostic=snapshot.diagnostic;
  $('notice').hidden=linked&&snapshot.connection==='connected'&&!diagnostic?.active;
@@ -62,7 +71,7 @@ function render(){
 function renderDetail(){
  const original=snapshot.rows.find(row=>row.id===selectedId);if(!original){$('detail').close();return;}const row=effective(original);
  $('detail-title').textContent=row.name;$('detail-fields').replaceChildren();
- const fields=[['项目目录',row.cwd||'待识别'],['Codex 状态',statusLabel(row)+' · '+stateNote(row)],['状态持续',duration(row,true)],['窗口对应',row.mapping==='project-match'?'已按项目目录核对':row.mapping==='ambiguous'?'存在多个可能对应的项目或窗口，实际归属待确认':'窗口归属待确认'],['最后确认',row.lastSeen?new Date(row.lastSeen).toLocaleString():'尚未确认'],['窗口标识',row.ownerClientId.slice(0,8)],['会话数量',String(row.sessionCount||1)]];
+ const fields=[['会话项目目录',row.cwd||'待识别'],['Codex 状态',statusLabel(row)+' · '+stateNote(row)],['状态持续',duration(row,true)],['窗口对应',panelNote(row)||'窗口归属待确认'],['最后确认',row.lastSeen?new Date(row.lastSeen).toLocaleString():'尚未确认'],['面板标识',row.viewClientId?.slice(0,8)||'尚未确认'],['会话数量',String(row.sessionCount||1)]];
  if(row.blocked)fields.splice(2,0,['阻塞原因',row.blockReason||'未填写原因']);
  for(const [title,value]of fields){const dd=element('dd',null,value);if(title==='状态持续')dd.id='detail-duration';$('detail-fields').append(element('dt',null,title),dd);}
  const list=$('detail-sessions');if(list){
@@ -70,6 +79,8 @@ function renderDetail(){
   for(const original of row.sessions||[row]){
    const session=effective(original),card=element('div','session-card'),head=element('div','session-head'),badge=element('span','badge '+session.status+(session.awaitingInput?' awaiting-input':''),statusLabel(session));
    head.append(element('span','session-id',session.threadId.slice(0,12)),badge);
+   if(session.shared)head.append(element('span','session-count','共享会话'));
+   if(session.outsideWorkspace)head.append(element('span','session-count','其他项目 · 不计入窗口状态'));
    const elapsed=element('span','session-elapsed',duration(session,true));elapsed.dataset.sessionDuration=session.id;
    card.append(head,element('div','state-note',stateNote(session)),elapsed);
    if(session.cwd&&session.cwd!==row.cwd)card.append(element('div','session-path',session.cwd));

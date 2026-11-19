@@ -8,6 +8,7 @@ class Collector{
   this.maxFrameBytes=maxFrameBytes;this.recoveryMs=recoveryMs;this.decodeFailures=0;
   this.pending=new Map();this.followed=new Map();this.checked=new Map();this.removals=new Map();this.resyncs=new Map();
   this.announcers=new Map();this.owners=new Map();this.ownerQueries=new Map();
+  this.nonViewers=new Set();
   this.clientId='initializing-client';this.stopped=true;this.epoch=0;this.attempt=0;
   this.onResync=record=>this.resync(record);state.on('resync',this.onResync);
   this.onRecovery=()=>this.updateRecovery();state.on('change',this.onRecovery);
@@ -30,6 +31,7 @@ class Collector{
   this.following(p,true);
   this.queryOwner(p);
  }
+ syncViewers(p){this.state.setViewers('local',p.conversationId,[...(this.announcers.get('local:'+p.conversationId)||[])]);}
  queryOwner(p){
   const key='local:'+p.conversationId;if(!this.followed.has(key)||this.ownerQueries.has(key))return;
   const query=Symbol();this.ownerQueries.set(key,query);
@@ -45,6 +47,7 @@ class Collector{
   const key='local:'+p.conversationId;
   if(this.followed.has(key))this.following(p,false);
   this.followed.delete(key);this.announcers.delete(key);this.owners.delete(key);this.ownerQueries.delete(key);
+  this.state.setViewers('local',p.conversationId,[]);
   for(const name of this.checked.keys())if(name.endsWith(':'+p.conversationId))this.checked.delete(name);
   for(const [name,timer]of this.resyncs)if(name.endsWith(':'+p.conversationId)){clearTimeout(timer);this.resyncs.delete(name);}
   if(removeRows)this.state.removeThread(p.conversationId);
@@ -80,13 +83,24 @@ class Collector{
   if(message.type!=='broadcast')return;
   if(message.method==='client-status-changed'&&message.version===0){
    const p=message.params;
+   if(p?.clientType==='codex-window-monitor'&&typeof p.clientId==='string'){
+    this.nonViewers.add(p.clientId);
+    for(const [key,clients]of this.announcers)if(clients.delete(p.clientId)){const info={conversationId:key.slice(6)};if(!clients.size)this.retire(info);else this.syncViewers(info);}
+   }
    if(p?.status==='disconnected'){
+    this.nonViewers.delete(p.clientId);
     const affected=this.state.snapshot().rows.filter(r=>r.ownerClientId===p.clientId);
     if(affected.length)this.state.clientGone(p.clientId);
     const ownedThreads=new Set(affected.map(row=>row.threadId));
-    for(const [key,clients]of this.announcers){clients.delete(p.clientId);if(!clients.size){const threadId=key.slice(6);this.retire({conversationId:threadId},{removeRows:!ownedThreads.has(threadId)});}}
+    for(const [key,clients]of this.announcers){clients.delete(p.clientId);if(!clients.size){const threadId=key.slice(6);this.retire({conversationId:threadId},{removeRows:!ownedThreads.has(threadId)});}else this.syncViewers({conversationId:key.slice(6)});}
+    this.state.removeViewer(p.clientId);
     if(!affected.length)return;
-    for(const row of affected){this.followed.delete('local:'+row.threadId);this.checked.delete(p.clientId+':'+row.threadId);}
+    for(const row of affected){
+     const info={conversationId:row.threadId},key='local:'+row.threadId;
+     this.checked.delete(p.clientId+':'+row.threadId);this.owners.delete(key);this.ownerQueries.delete(key);
+     if(this.announcers.get(key)?.size){this.queryOwner(info);this.following(info,true);}
+     else this.followed.delete(key);
+    }
     clearTimeout(this.removals.get(p.clientId));
     const timer=setTimeout(()=>{this.removals.delete(p.clientId);if(this.state.connection==='connected')this.state.removeClient(p.clientId);},this.removeAfterMs);timer.unref();this.removals.set(p.clientId,timer);
    }return;
@@ -95,11 +109,12 @@ class Collector{
   if(p?.hostId!=='local'||typeof p.conversationId!=='string'||p.conversationId.length>200||message.sourceClientId===this.clientId)return;
   const key='local:'+p.conversationId;
   if(message.method==='thread-stream-following-changed'&&message.version===1&&typeof p.following==='boolean'){
+   if(typeof message.sourceClientId!=='string'||!message.sourceClientId.length||message.sourceClientId.length>200||this.nonViewers.has(message.sourceClientId))return;
    if(p.following){
     let clients=this.announcers.get(key);if(!clients){clients=new Set();this.announcers.set(key,clients);}clients.add(message.sourceClientId);
-    const wasFollowed=this.followed.has(key);this.follow(p);if(wasFollowed)this.queryOwner(p);
+    this.syncViewers(p);const wasFollowed=this.followed.has(key);this.follow(p);if(wasFollowed)this.queryOwner(p);
    }else{
-    const clients=this.announcers.get(key);if(clients?.delete(message.sourceClientId)&&clients.size===0)this.retire(p);
+    const clients=this.announcers.get(key);if(clients?.delete(message.sourceClientId)){if(clients.size===0)this.retire(p);else this.syncViewers(p);}
    }
    return;
   }
@@ -120,13 +135,13 @@ class Collector{
  }
  reconcile(epoch){
   clearTimeout(this.reconcileTimer);
-  const previousThreads=new Set(this.state.snapshot().rows.map(row=>row.threadId));
-  if(!previousThreads.size)return;
+  const previousThreads=new Set([...this.state.snapshot().rows.map(row=>row.threadId),...[...this.state.viewers.keys()].map(key=>key.slice(6))]);
   this.reconcileTimer=setTimeout(()=>{
    this.reconcileTimer=null;
    if(this.stopped||epoch!==this.epoch||this.state.connection!=='connected')return;
    // Rediscovered sessions may still be waiting for a snapshot; only retire absent ones.
    for(const threadId of previousThreads)if(!this.followed.has('local:'+threadId))this.state.removeThread(threadId);
+   this.state.reconcileViewers();
   },this.removeAfterMs);this.reconcileTimer.unref();
  }
  updateRecovery(){
@@ -159,7 +174,7 @@ class Collector{
   socket.on('close',()=>{
    decoder.discard();
    clearTimeout(initTimer);if(epoch!==this.epoch)return;
-   this.clearTransient();this.followed.clear();this.checked.clear();this.announcers.clear();this.owners.clear();this.ownerQueries.clear();
+   this.clearTransient();this.followed.clear();this.checked.clear();this.announcers.clear();this.owners.clear();this.ownerQueries.clear();this.nonViewers.clear();
    if(this.stopped)return;
    this.state.disconnected(fault?this.state.diagnostic.message+'，正在重试':'尚未连接到 Codex，正在重试');
    const delay=Math.max(Math.min(5000,this.retryMs*2**Math.min(this.attempt++,4)),Math.min(30000,this.retryMs*2**Math.min(this.decodeFailures,6)));
