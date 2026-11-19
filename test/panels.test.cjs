@@ -4,6 +4,7 @@ const {MonitorState}=require('../src/state.cjs');
 function snapshot(state,thread,owner='owner',status='idle',revision=1){
  state.ingest({type:'broadcast',method:'thread-stream-state-changed',version:13,sourceClientId:owner,params:{hostId:'local',conversationId:thread,change:{type:'snapshot',revision,conversationState:{cwd:'D:/'+thread,threadRuntimeStatus:{type:status}}}}});
 }
+const observation=(threadId,viewKey='webview-a')=>({threadId,viewKey});
 test('different viewing panels remain separate even when their sessions share an owner',()=>{
  const s=new MonitorState();s.connected();s.setViewers('local','a',['panel-a']);s.setViewers('local','b',['panel-b']);
  snapshot(s,'a');snapshot(s,'b','owner','active');
@@ -36,6 +37,101 @@ test('switching subscriptions and changing owner preserve the viewing panel iden
 test('panel identity does not borrow workspace verification from a followed session',()=>{
  const s=new MonitorState();s.connected();s.setViewers('local','a',['panel']);s.setViewers('local','b',['panel']);snapshot(s,'a');snapshot(s,'b','owner','active');s.setMapping('owner','a','ide');
  const row=s.windowSnapshot().rows[0];assert.equal(row.projectAmbiguous,true);assert.equal(row.cwd,'');assert.equal(row.requiresWindowSelection,true);assert.notEqual(row.mapping,'project-match');
+});
+
+test('current session mode uses the selected session while preserving the panel and its blocking mark',()=>{
+ const s=new MonitorState({currentSession:true});s.connected();
+ s.setViewers('local','old',['panel']);s.setViewers('local','now',['panel']);
+ snapshot(s,'old','owner','active');snapshot(s,'now');
+ let row=s.windowSnapshot().rows[0],id=row.id;
+ assert.equal(row.status,'unknown');
+ s.setBlocked(id,true,'waiting');
+ s.setCurrentSessions([observation('now')]);
+ row=s.windowSnapshot().rows[0];
+ assert.equal(row.id,id);assert.equal(row.blockReason,'waiting');
+ assert.equal(row.status,'idle');assert.equal(row.name,'now');assert.equal(row.currentSession,'confirmed');
+ assert.deepEqual(row.sessions.map(session=>session.threadId),['now']);
+ assert.equal(s.snapshot().rows.length,2);
+ s.setCurrentSessions([observation('old')]);
+ assert.equal(s.windowSnapshot().rows[0].status,'busy');
+ assert.equal(s.windowSnapshot().rows[0].sinceKnown,false);
+ s.setCurrentSessions(null);
+ assert.equal(s.windowSnapshot().rows[0].status,'unknown');
+ assert.equal(s.windowSnapshot().currentSession,'unavailable');
+});
+
+test('current session mode rejects shared, duplicate and conflicting panel matches',()=>{
+ const s=new MonitorState({currentSession:true});s.connected();
+ s.setViewers('local','shared',['panel-a','panel-b']);snapshot(s,'shared');
+ s.setViewers('local','a',['panel-a']);snapshot(s,'a','owner','active');
+ s.setViewers('local','other',['panel-a']);snapshot(s,'other');
+ snapshot(s,'unassigned');
+ for(const ids of [['shared'],['a','a'],['a','other']]){
+  s.setCurrentSessions(ids.map((id,index)=>observation(id,'webview-'+index)));
+  const rows=s.windowSnapshot().rows;
+  assert.ok(rows.filter(row=>row.viewClientId).every(row=>row.status==='unknown'));
+  assert.equal(rows.find(row=>row.displayKind==='unassigned').status,'idle');
+ }
+ s.setCurrentSessions([observation('a')]);s.disconnected();
+ assert.equal(s.windowSnapshot().rows.find(row=>row.viewClientId==='panel-a').currentSession,'unconfirmed');
+});
+
+test('a shared conversation follows an anchored Webview and keeps its own panel state',()=>{
+ const s=new MonitorState({currentSession:true});s.connected();
+ const add=(id,viewers,status)=>{s.setViewers('local',id,viewers);snapshot(s,id,'owner',status);};
+ add('anchor-a',['panel-a'],'active');add('anchor-b',['panel-b'],'active');add('shared',['panel-a','panel-b'],'idle');
+ const panel=id=>s.windowSnapshot().rows.find(row=>row.viewClientId===id);
+ s.setCurrentSessions([observation('anchor-a'),observation('anchor-b','webview-b')]);
+ s.setBlocked(panel('panel-a').id,true,'pause');
+ s.setCurrentSessions([observation('shared'),observation('shared','webview-b')]);
+ assert.equal(panel('panel-a').status,'idle');assert.equal(panel('panel-a').blockReason,'pause');
+ assert.equal(panel('panel-b').status,'idle');assert.equal(panel('panel-b').blocked,false);
+ s.setViewers('local','anchor-a',['panel-a','panel-b']);
+ assert.equal(panel('panel-a').currentSession,'unconfirmed');assert.equal(panel('panel-b').currentSession,'confirmed');
+ s.setViewers('local','anchor-a',['panel-a']);
+ assert.equal(panel('panel-a').currentSession,'unconfirmed','a disproved anchor must not be reused');
+ s.setCurrentSessions([observation('shared','reloaded-b')]);
+ assert.equal(panel('panel-b').currentSession,'unconfirmed');
+});
+
+test('probe loss and IPC disconnection invalidate shared-session panel anchors',()=>{
+ const s=new MonitorState({currentSession:true});s.connected();
+ s.setViewers('local','anchor',['panel-a']);snapshot(s,'anchor');
+ s.setViewers('local','shared',['panel-a','panel-b']);snapshot(s,'shared');
+ const status=()=>s.windowSnapshot().rows.find(row=>row.viewClientId==='panel-a').currentSession;
+ for(const invalidate of [()=>s.setCurrentSessions(null),()=>s.removeViewer('panel-a'),()=>{s.disconnected();s.connected();}]){
+  s.setViewers('local','anchor',['panel-a']);s.setViewers('local','shared',['panel-a','panel-b']);
+  s.setCurrentSessions([observation('anchor')]);s.setCurrentSessions([observation('shared')]);
+  assert.equal(status(),'confirmed');
+  invalidate();
+  s.setViewers('local','anchor',['panel-a']);s.setViewers('local','shared',['panel-a','panel-b']);
+  s.setCurrentSessions([observation('shared')]);assert.equal(status(),'unconfirmed');
+ }
+});
+
+test('cached IPC subscriptions cannot establish a new Webview anchor after reconnect',()=>{
+ const s=new MonitorState({currentSession:true});s.connected();
+ s.setViewers('local','anchor',['panel-a']);snapshot(s,'anchor');
+ s.disconnected();s.connected();snapshot(s,'anchor');
+ s.setCurrentSessions([observation('anchor')]);
+ assert.equal(s.windowSnapshot().rows[0].currentSession,'unconfirmed');
+ s.setViewers('local','anchor',['panel-a']);s.setCurrentSessions([observation('anchor')]);
+ assert.equal(s.windowSnapshot().rows[0].currentSession,'confirmed');
+});
+
+test('a temporary missing active marker keeps only the anchor for a verified live document',()=>{
+ const s=new MonitorState({currentSession:true});s.connected();
+ s.setViewers('local','anchor',['panel-a']);snapshot(s,'anchor');
+ s.setViewers('local','shared',['panel-a','panel-b']);snapshot(s,'shared');
+ const row=()=>s.windowSnapshot().rows.find(row=>row.viewClientId==='panel-a');
+ s.setCurrentSessions([observation('anchor')]);
+ s.setCurrentSessions([],['webview-a']);
+ assert.equal(row().status,'unknown');
+ s.setCurrentSessions([observation('shared')],['webview-a']);
+ assert.equal(row().currentSession,'confirmed');
+ s.setCurrentSessions([],['another-document']);
+ s.setCurrentSessions([observation('shared')],['webview-a']);
+ assert.equal(row().currentSession,'unconfirmed');
 });
 
 test('blocking survives a release-first conversation switch but not panel disconnection',()=>{

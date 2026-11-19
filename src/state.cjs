@@ -32,8 +32,41 @@ function inputSummary(row,connection){
   inputSync:waiting&&!input.pendingInputCount&&input.inputSync==='complete'?'partial':input.inputSync};
 }
 class MonitorState extends EventEmitter{
- constructor({clock=Date.now}={}){super();this.clock=clock;this.rows=new Map();this.viewers=new Map();this.windowTimings=new Map();this.windowBlocks=new Map();this.connection='connecting';this.connectionReason='正在连接 Codex';this.sequence=0;}
+ constructor({clock=Date.now,currentSession=false}={}){super();this.clock=clock;this.rows=new Map();this.viewers=new Map();this.windowTimings=new Map();this.windowBlocks=new Map();this.connection='connecting';this.connectionReason='正在连接 Codex';this.sequence=0;this.currentSessionEnabled=currentSession;this.currentSessions=null;this.currentPanels=new Map();this.currentSessionFreshThreads=new Set();}
  changed(){this.sequence++;this.windowSnapshot();this.emit('change',this.snapshot());}
+ soleViewer(threadId){
+  if(!this.currentSessionFreshThreads.has(threadId))return null;
+  const viewers=this.viewers.get('local:'+threadId);
+  return viewers?.size===1?[...viewers][0]:null;
+ }
+ setCurrentSessions(observations,documentKeys=observations?.map(({viewKey})=>viewKey)){
+  if(!this.currentSessionEnabled)return;
+  const next=observations===null?null:[...observations].sort((a,b)=>a.viewKey.localeCompare(b.viewKey));
+  const previous=this.currentPanels,panels=new Map();
+  if(this.connection==='connected'&&next){
+   const live=new Set(documentKeys);
+   for(const [key,binding]of previous){
+    if(live.has(key)&&this.soleViewer(binding.anchor)===binding.viewer)panels.set(key,binding);
+   }
+   const threads=new Map(),views=new Map(),claims=new Map();
+   for(const {threadId,viewKey}of next){
+    threads.set(threadId,(threads.get(threadId)||0)+1);
+    views.set(viewKey,(views.get(viewKey)||0)+1);
+   }
+   for(const {threadId,viewKey}of next){
+    if(!live.has(viewKey)||panels.has(viewKey)||views.get(viewKey)!==1||threads.get(threadId)!==1)continue;
+    const viewer=this.soleViewer(threadId);
+    if(viewer)panels.set(viewKey,{viewer,anchor:threadId});
+   }
+   for(const {viewer}of panels.values())claims.set(viewer,(claims.get(viewer)||0)+1);
+   for(const [viewKey,{viewer}]of panels)if(claims.get(viewer)!==1||(views.get(viewKey)||0)>1)panels.delete(viewKey);
+  }
+  const samePanels=panels.size===previous.size&&[...panels].every(([key,{viewer,anchor}])=>{
+   const before=previous.get(key);return before?.viewer===viewer&&before.anchor===anchor;
+  });
+  if(samePanels&&JSON.stringify(this.currentSessions)===JSON.stringify(next))return;
+  this.currentSessions=next;this.currentPanels=panels;this.changed();
+ }
  connected(){this.connection='connected';this.connectionReason='已连接 Codex';this.changed();}
  collectionError(error){
   const messages={IPC_FRAME_TOO_LARGE:'Codex 状态消息超过接收上限',IPC_INVALID_FRAME:'Codex 状态消息帧长度无效',IPC_INVALID_JSON:'Codex 状态消息格式无效',IPC_JSON_RESOURCE_LIMIT:'Codex 状态消息超过解析资源上限'};
@@ -45,16 +78,20 @@ class MonitorState extends EventEmitter{
  collectionRecovered(){if(this.diagnostic?.active){this.diagnostic={...this.diagnostic,active:false};this.changed();}}
  disconnected(reason='采集连接中断'){
   this.connection='disconnected';this.connectionReason=reason;
+  this.currentSessions=null;this.currentPanels.clear();this.currentSessionFreshThreads.clear();
   for(const row of this.rows.values()){row.synced=false;row.revision=null;row.minimumRevision=0;this.unknown(row,reason);}
   this.changed();
  }
  unknown(row,reason){if(row.status!=='unknown'){row.since=this.clock();row.sinceKnown=false;}row.status='unknown';row.reason=reason;}
  clientGone(clientId){for(const row of this.rows.values())if(row.ownerClientId===clientId){row.synced=false;this.unknown(row,'Codex 面板已断开');}this.changed();}
  removeClient(clientId){for(const [id,row]of this.rows)if(row.ownerClientId===clientId)this.rows.delete(id);this.changed();}
- removeThread(threadId,exceptOwner){for(const [id,row]of this.rows)if(row.threadId===threadId&&row.ownerClientId!==exceptOwner)this.rows.delete(id);if(exceptOwner===undefined)this.viewers.delete('local:'+threadId);this.changed();}
+ removeThread(threadId,exceptOwner){for(const [id,row]of this.rows)if(row.threadId===threadId&&row.ownerClientId!==exceptOwner)this.rows.delete(id);if(exceptOwner===undefined){this.viewers.delete('local:'+threadId);this.currentSessionFreshThreads.delete(threadId);}this.changed();}
  setViewers(hostId,threadId,clientIds){
   if(hostId!=='local'||typeof threadId!=='string'||threadId.length>200)return;
   const viewers=new Set(clientIds.filter(id=>typeof id==='string'&&id.length>0&&id.length<=200));
+  if(this.currentSessionEnabled&&this.connection==='connected'){
+   if(viewers.size)this.currentSessionFreshThreads.add(threadId);else this.currentSessionFreshThreads.delete(threadId);
+  }
   this.viewers.set(hostId+':'+threadId,viewers);this.changed();
  }
  removeViewer(clientId){
@@ -154,10 +191,28 @@ class MonitorState extends EventEmitter{
   for(const row of snapshot.rows){
    if(!assigned.has(row.id))add('session:'+row.id,row);
   }
+  const activeByPanel=new Map();
+  if(this.connection==='connected'&&this.currentSessions){
+   for(const {threadId,viewKey}of this.currentSessions){
+    const binding=this.currentPanels.get(viewKey);
+    if(!binding)continue;
+    const {viewer,anchor}=binding;
+    if(this.soleViewer(anchor)!==viewer){this.currentPanels.delete(viewKey);continue;}
+    if(!this.currentSessionFreshThreads.has(threadId)||!this.viewers.get('local:'+threadId)?.has(viewer))continue;
+    const id='panel:'+viewer+':local';
+    const matching=groups.get(id)?.filter(row=>row.threadId===threadId)||[];
+    if(matching.length===1)activeByPanel.set(id,matching[0]);
+   }
+  }
   const rows=[];const directory=row=>normalizeDirectory(row.cwd);
-  for(const [id,members]of groups){
+  for(const [id,followed]of groups){
+   const viewClientId=viewClients.get(id);
+   const experimental=this.currentSessionEnabled&&!!viewClientId;
+   const active=experimental?activeByPanel.get(id):null;
+   const unconfirmed=experimental&&!active;
+   const members=active?[active]:followed;
    const counts={busy:0,attention:0,unknown:0,idle:0};for(const row of members)counts[row.status]++;
-   const status=['busy','attention','unknown','idle'].find(value=>counts[value]>0)||'unknown';
+   const status=unconfirmed?'unknown':['busy','attention','unknown','idle'].find(value=>counts[value]>0)||'unknown';
    const candidates=members.filter(row=>row.status===status).sort((a,b)=>(b.lastSeen||0)-(a.lastSeen||0)||a.id.localeCompare(b.id));
    const representative=candidates[0]||members[0];
    // Project identity is independent of whichever session currently drives the status.
@@ -167,19 +222,19 @@ class MonitorState extends EventEmitter{
    const project=projectAmbiguous?null:identityCandidates.sort((a,b)=>a.id.localeCompare(b.id))[0]||representative;
    let timing=this.windowTimings.get(id);
    const sameMembers=timing&&timing.members.size===members.length&&members.every(row=>timing.members.has(row.id));
-   if(!timing)timing={status,since:Math.min(...candidates.map(row=>row.since)),sinceKnown:false};
+   if(!timing)timing={status,since:experimental?now:Math.min(...candidates.map(row=>row.since)),sinceKnown:false};
    else if(timing.status!==status)timing={status,since:now,sinceKnown:timing.status!=='unknown'&&status!=='unknown'&&sameMembers};
-   else if(!sameMembers)timing={...timing,sinceKnown:false};
+   else if(!sameMembers)timing={...timing,since:experimental?now:timing.since,sinceKnown:false};
    timing.members=new Set(members.map(row=>row.id));
    this.windowTimings.set(id,timing);
    const labels={busy:'执行中',attention:'待处理',unknown:'未知',idle:'空闲'};
-   const reason=members.length===1?representative.reason:members.length+' 个会话：'+Object.keys(counts).filter(key=>counts[key]).map(key=>counts[key]+' '+labels[key]).join('，');
-   const pendingInputCount=members.reduce((sum,row)=>sum+row.pendingInputCount,0),awaitingInput=members.some(row=>row.awaitingInput);
-   const inputSync=members.every(row=>row.inputSync==='complete')?'complete':members.some(row=>row.inputSync==='unknown')?'unknown':'partial';
+   const reason=unconfirmed?'当前会话未确认':members.length===1?representative.reason:members.length+' 个会话：'+Object.keys(counts).filter(key=>counts[key]).map(key=>counts[key]+' '+labels[key]).join('，');
+   const pendingInputCount=unconfirmed?0:members.reduce((sum,row)=>sum+row.pendingInputCount,0),awaitingInput=!unconfirmed&&members.some(row=>row.awaitingInput);
+   const inputSync=unconfirmed?'unknown':members.every(row=>row.inputSync==='complete')?'complete':members.some(row=>row.inputSync==='unknown')?'unknown':'partial';
    const sessions=members.map(row=>({id:row.id,threadId:row.threadId,cwd:row.cwd,name:row.name,status:row.status,reason:row.reason,since:row.since,sinceKnown:row.sinceKnown,lastSeen:row.lastSeen,pendingInputCount:row.pendingInputCount,awaitingInput:row.awaitingInput,inputSync:row.inputSync,shared:(this.viewers.get(row.hostId+':'+row.threadId)?.size||0)>1}));
    const ideClientId=project?.ideClientId||null;
-   const viewClientId=viewClients.get(id),sharedSessionCount=sessions.filter(row=>row.shared).length;
-   rows.push({...representative,id,viewClientId,displayKind:viewClientId?'panel':'unassigned',requiresWindowSelection:true,sharedSessionCount,name:project?.name||'多项目面板',cwd:project?.cwd||'',projectAmbiguous,blocked:this.windowBlocks.has(id),blockReason:this.windowBlocks.get(id)||'',status,reason,since:timing.since,sinceKnown:timing.sinceKnown,ideClientId,lastSeen:Math.max(...members.map(row=>row.lastSeen||0))||null,sessionCount:sessions.length,sessions,pendingInputCount,awaitingInput,inputSync});
+   const sharedSessionCount=sessions.filter(row=>row.shared).length;
+   rows.push({...representative,id,viewClientId,displayKind:viewClientId?'panel':'unassigned',requiresWindowSelection:true,sharedSessionCount,name:project?.name||'多项目面板',cwd:project?.cwd||'',projectAmbiguous,blocked:this.windowBlocks.has(id),blockReason:this.windowBlocks.get(id)||'',status,reason,since:timing.since,sinceKnown:timing.sinceKnown,ideClientId,lastSeen:unconfirmed?null:Math.max(...members.map(row=>row.lastSeen||0))||null,sessionCount:sessions.length,sessions,pendingInputCount,awaitingInput,inputSync,...(experimental?{currentSession:active?'confirmed':'unconfirmed'}:{})});
   }
   for(const id of this.windowTimings.keys())if(!groups.has(id))this.windowTimings.delete(id);
   // An empty panel may just be switching conversations. Explicit client
@@ -189,7 +244,7 @@ class MonitorState extends EventEmitter{
   for(const row of rows){const key=directory(row);if(key)counts.set(key,(counts.get(key)||0)+1);}
   for(const row of rows)row.mapping=row.projectAmbiguous||counts.get(directory(row))>1?'ambiguous':'unconfirmed';
   const sessionCount=new Set([...groups.values()].flatMap(members=>members.map(row=>row.hostId+':'+row.threadId))).size;
-  return {...snapshot,sessionCount,rows};
+  return {...snapshot,sessionCount,rows,...(this.currentSessionEnabled?{currentSession:this.currentSessions===null?'unavailable':'enabled'}:{})};
  }
  snapshot(){
   const counts=new Map();for(const row of this.rows.values()){const key=row.cwd.toLowerCase();counts.set(key,(counts.get(key)||0)+1);}

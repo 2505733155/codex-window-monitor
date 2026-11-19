@@ -25,6 +25,26 @@
 本机访问链接记录在 .runtime/instance.json；该文件包含随机访问凭据，请勿公开分享。
 每次停止后重新启动可使用不同端口和凭据，应使用启动入口打开。
 
+### 当前会话实验模式
+
+默认按面板订阅汇总。实验模式开启后，监控先用仅由一个面板订阅的当前对话建立对应。切到共享会话时，只要仍是同一个 Webview 文档、原订阅仍能唯一确认该面板，且面板已订阅新会话，就会沿用同一行。面板重载、调试或 IPC 断线、订阅关系出现歧义时会重新核对，无法核对的行显示「当前会话未确认」。窗口跳转仍使用原有选择流程。
+
+1. 明确启用监控对指定端口的读取。若监控已运行，先用「停止监控.cmd」停止。设置会保存在本机 `.runtime/current-session.json`。
+
+       node src/service.cjs --current-session-port=9222 --open
+
+2. 以后双击「启动监控.cmd」。如果 VS Code 尚未运行，启动器会带本机调试参数打开 VS Code 和监控项目。如果 VS Code 已开启调试，直接使用当前实例。如果 VS Code 已按普通方式启动，保存工作并选择「文件 → 退出」，再双击启动器。
+
+3. 要恢复默认模式，运行以下命令。监控已运行时，重启监控使更改生效。关闭以调试参数启动的 VS Code 实例后，调试端口也会关闭。
+
+       node src/service.cjs --no-current-session --open
+
+自动启动可通过 PATH 中的 `code` 或 `Code.exe`、Windows 应用注册表和常见安装位置查找 VS Code。使用自定义安装位置或专用用户数据目录时，也可以手动启动 VS Code，启动器会使用已经运行的实例。PowerShell 示例中的路径按实际位置修改。
+
+    & 'C:\Program Files\Microsoft VS Code\Code.exe' --remote-debugging-address=127.0.0.1 --remote-debugging-port=9222
+
+调试接口只绑定本机，但其他能访问该端口的本机程序也可能用它检查或操作 VS Code 页面。监控只连接手动配置的端口，只查询活动会话标识和窗口关联所需的帧 ID。执行状态仍由只读 Codex IPC 提供。
+
 ## 页面
 
 - 默认按已发现的会话面板汇总，可按状态筛选、搜索会话的项目名称/路径、优先显示空闲面板。展示按跟随会话的面板标识组织，执行状态仍由真正的会话拥有者提供；同一拥有者提供的会话可以出现在不同面板中。
@@ -87,6 +107,7 @@ Windows 若拒绝前台激活，页面会提示失败，可再点一次或按 Wi
 | src/protocol.cjs、src/collector.cjs | IPC 消息帧、只读白名单、状态发现、订阅与重连 |
 | src/stream-json.cjs | 有界流式 JSON 校验、元数据筛选及正文跳过 |
 | src/state.cjs | 会话状态、修订校验、面板展示及独立会话计数 |
+| src/current-session.cjs | 实验模式的本机活动会话标识读取 |
 | src/input-state.cjs | 结构化问题与已接受回复的最小元数据投影 |
 | src/web.cjs、src/service.cjs | 本机 HTTP/SSE、鉴权、单实例与服务生命周期 |
 | src/windows.cjs、src/native/ | 窗口匹配及短时 PowerShell/C# 原生助手 |

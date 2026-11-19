@@ -3,6 +3,7 @@
 <body><main class="shell"><section class="panel" aria-label="Codex 窗口状态">
 <div class="toolbar"><nav class="tabs" aria-label="筛选状态"><button class="tab active" data-filter="all">全部 <span id="count-all">0</span></button><button class="tab" data-filter="idle">空闲 <span id="count-idle">0</span></button><button class="tab" data-filter="busy">执行中 <span id="count-busy">0</span></button><button class="tab" data-filter="other">其他 <span id="count-other">0</span></button></nav><div class="tools"><label class="search"><span aria-hidden="true">⌕</span><input id="search" type="search" placeholder="搜索项目或路径" aria-label="搜索项目或路径"></label><label class="sort"><input type="checkbox" id="idle-first" checked>空闲优先</label></div></div>
 <div id="notice" class="notice" role="status">正在连接本机监控服务…</div>
+<div id="current-session-notice" class="notice" role="status" hidden></div>
 <div id="window-message" class="window-message" role="status" aria-live="polite" hidden></div>
 <div class="table-scroll"><table><thead><tr><th>窗口 / 项目</th><th>Codex 状态</th><th>当前状态持续</th><th>操作</th></tr></thead><tbody id="rows"></tbody></table></div>
 <footer><span id="showing">尚未发现窗口</span><span id="connection">连接中</span></footer>

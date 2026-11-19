@@ -3,6 +3,7 @@ const fs=require('node:fs');const path=require('node:path');const net=require('n
 const {randomUUID,createHash}=require('node:crypto');const {execFile}=require('node:child_process');
 const {MonitorState}=require('./state.cjs');const {Collector}=require('./collector.cjs');const {createWeb}=require('./web.cjs');
 const {WindowNavigator}=require('./windows.cjs');
+const {CurrentSessionProbe,validDebugPort}=require('./current-session.cjs');
 const defaultDir=path.join(__dirname,'../.runtime');
 const pause=ms=>new Promise(resolve=>setTimeout(resolve,ms));
 function readInfo(runtimeDir){
@@ -24,7 +25,8 @@ async function stopRunning(runtimeDir=defaultDir){
  for(let n=0;n<40;n++){if(!await findRunning(runtimeDir))return true;await pause(50);}
  throw new Error('监控尚未退出，请稍后再试');
 }
-async function startService({runtimeDir=defaultDir,port=0,endpoint,startupTimeoutMs=60000,idleTimeoutMs=10000}={}){
+async function startService({runtimeDir=defaultDir,port=0,endpoint,currentSessionPort=null,startupTimeoutMs=60000,idleTimeoutMs=10000}={}){
+ if(currentSessionPort!==null&&!validDebugPort(currentSessionPort))throw new Error('无效的 VS Code 调试端口');
  fs.mkdirSync(runtimeDir,{recursive:true,mode:0o700});
  const hash=createHash('sha256').update(path.resolve(runtimeDir).toLowerCase()).digest('hex').slice(0,24);
  const lockEndpoint=process.platform==='win32'?'\\\\.\\pipe\\codex-window-monitor-'+hash:path.join(os.tmpdir(),'codex-window-monitor-'+hash+'.sock');
@@ -36,10 +38,10 @@ async function startService({runtimeDir=defaultDir,port=0,endpoint,startupTimeou
   for(let n=0;n<20;n++){const info=await findRunning(runtimeDir);if(info)return {existing:true,info};await pause(100);}
   throw new Error('已有实例占用运行锁，但身份无法核实；未停止或覆盖该进程。');
  }
- let web,collector,navigator,closePromise;const instanceId=randomUUID();const state=new MonitorState();
+ let web,collector,navigator,probe,closePromise;const instanceId=randomUUID();const state=new MonitorState({currentSession:currentSessionPort!==null});
  async function close(){
   if(closePromise)return closePromise;
-  closePromise=(async()=>{navigator?.close();collector?.stop();await web?.close();if(acquired)await new Promise(resolve=>lock.close(resolve));
+  closePromise=(async()=>{probe?.close();navigator?.close();collector?.stop();await web?.close();if(acquired)await new Promise(resolve=>lock.close(resolve));
    if(readInfo(runtimeDir)?.instanceId===instanceId){try{fs.unlinkSync(path.join(runtimeDir,'instance.json'));}catch{}}
   })();return closePromise;
  }
@@ -50,6 +52,7 @@ async function startService({runtimeDir=defaultDir,port=0,endpoint,startupTimeou
   const temporary=path.join(runtimeDir,'instance-'+instanceId+'.tmp');
   fs.writeFileSync(temporary,JSON.stringify(info,null,2),{mode:0o600});fs.renameSync(temporary,path.join(runtimeDir,'instance.json'));
   collector=new Collector(state,{endpoint});collector.start();
+  if(currentSessionPort!==null){probe=new CurrentSessionProbe(currentSessionPort,sample=>state.setCurrentSessions(sample?.observations??null,sample?.documentKeys));probe.start();}
   return {existing:false,info,state,close};
  }catch(error){await close();throw error;}
 }
@@ -58,10 +61,31 @@ function openUrl(url){
  const args=platform==='win32'?['url.dll,FileProtocolHandler',url]:[url];
  execFile(command,args,{windowsHide:true},()=>{});
 }
+function currentSessionPreference(args,runtimeDir){
+ const options=args.filter(arg=>arg==='--no-current-session'||arg==='--current-session-port'||arg.startsWith('--current-session-port='));
+ const file=path.join(runtimeDir,'current-session.json');
+ if(!options.length){
+  try{const {port}=JSON.parse(fs.readFileSync(file,'utf8'));if(validDebugPort(port))return port;}catch{}
+  return null;
+ }
+ if(options.length!==1)throw new Error('只能指定一项当前会话设置');
+ const option=options[0];
+ const port=option==='--no-current-session'?null:Number(option.split('=')[1]);
+ if(port!==null&&(!/^--current-session-port=[0-9]{1,5}$/.test(option)||!validDebugPort(port)))throw new Error('请指定有效端口，例如 --current-session-port=9222');
+ fs.mkdirSync(runtimeDir,{recursive:true,mode:0o700});
+ const temporary=path.join(runtimeDir,'current-session-'+randomUUID()+'.tmp');
+ try{
+  fs.writeFileSync(temporary,JSON.stringify({port}),{mode:0o600});
+  fs.renameSync(temporary,file);
+ }finally{try{fs.unlinkSync(temporary);}catch{}}
+ return port;
+}
 if(require.main===module){
  (async()=>{
   if(process.argv.includes('--stop')){console.log(await stopRunning()?'监控已停止。':'没有正在运行的监控。');return;}
-  const service=await startService();console.log(JSON.stringify({existing:service.existing,url:service.info.url}));
+  const args=process.argv.slice(2);
+  const service=await startService({currentSessionPort:currentSessionPreference(args,defaultDir)});console.log(JSON.stringify({existing:service.existing,url:service.info.url}));
+  if(service.existing&&args.some(arg=>arg==='--no-current-session'||arg.startsWith('--current-session-port=')))console.log('当前会话设置已保存，停止并重新启动监控后生效。');
   if(process.argv.includes('--open'))openUrl(service.info.url);
   if(!service.existing){for(const signal of ['SIGINT','SIGTERM'])process.once(signal,()=>service.close().catch(()=>{}));}
  })().catch(error=>{

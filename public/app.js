@@ -14,7 +14,11 @@ function inputNote(row){
  return (count?(sync==='complete'?'':'至少 ')+count+' 个问题待回答':'')+(sync&&sync!=='complete'?(count?' · ':'')+(sync==='partial'?'问题记录未完全同步':'待回答状态未确认'):'');
 }
 function stateNote(row){return [row.reason,inputNote(row)].filter(Boolean).join(' · ');}
-function panelNote(row){return row.displayKind==='unassigned'?'窗口归属待确认':row.displayKind==='panel'?'会话面板 · 首次前往时选择窗口':'';}
+function panelNote(row){
+ if(row.displayKind==='unassigned')return '窗口归属待确认';
+ if(row.displayKind!=='panel')return '';
+ return (row.currentSession==='confirmed'?'当前会话 · ':'会话面板 · ')+'首次前往时选择窗口';
+}
 function duration(row,precise=false){
  if(row.status==='unknown')return '—';
  const seconds=Math.max(0,Math.floor((Date.now()-row.since)/1000));let text;
@@ -58,6 +62,11 @@ function render(){
  $('showing').textContent='显示 '+visible.length+' / '+rows.length+' 个面板或待归属会话 · 共 '+(snapshot.sessionCount??rows.length)+' 个独立会话';
  $('connection').textContent=linked?(snapshot.connection==='connected'?'● 实时连接':'○ 等待 Codex'):'○ 页面连接中断';
  const diagnostic=snapshot.diagnostic;
+ const sessionNotice=$('current-session-notice');
+ if(sessionNotice){
+  sessionNotice.hidden=!linked||!snapshot.currentSession;
+  sessionNotice.textContent=snapshot.currentSession==='unavailable'?'当前会话实验模式 · 调试连接暂不可用。如果 VS Code 已按普通方式启动，请保存工作并退出 VS Code，再双击「启动监控」。':'当前会话实验模式 · 先确认 Webview 对应的面板，再跟随该面板切换对话。';
+ }
  $('notice').hidden=linked&&snapshot.connection==='connected'&&!diagnostic?.active;
  const bytes=value=>value>=1048576?(value/1048576).toFixed(2)+' MiB':value>=1024?(value/1024).toFixed(2)+' KiB':value+' B';
  $('notice').textContent=diagnostic?.active?[diagnostic.message,diagnostic.observedBytes!=null?'实际 '+bytes(diagnostic.observedBytes):'',diagnostic.limitBytes!=null?'上限 '+bytes(diagnostic.limitBytes):'','错误码 '+diagnostic.code,'最近发生 '+new Date(diagnostic.lastOccurredAt).toLocaleString(),'累计 '+diagnostic.count+' 次','该次连接的状态已失效，正在重新同步；无法从消息头确认来源窗口。'].filter(Boolean).join(' · '):linked?(snapshot.connectionReason||'等待连接 Codex'):'本机监控服务连接中断，旧状态已标为未知；正在重新连接。';
