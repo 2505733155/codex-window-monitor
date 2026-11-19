@@ -193,11 +193,27 @@ class MonitorState extends EventEmitter{
   }
   const activeByPanel=new Map();
   if(this.connection==='connected'&&this.currentSessions){
+   for(const [key,{viewer,anchor}]of this.currentPanels){
+    if(this.soleViewer(anchor)!==viewer)this.currentPanels.delete(key);
+   }
+   const reserved=new Set([...this.currentPanels.values()].map(binding=>binding.viewer));
+   const observedThreads=new Map(),remainingByView=new Map(),claims=new Map();
+   for(const {threadId}of this.currentSessions)observedThreads.set(threadId,(observedThreads.get(threadId)||0)+1);
    for(const {threadId,viewKey}of this.currentSessions){
-    const binding=this.currentPanels.get(viewKey);
-    if(!binding)continue;
-    const {viewer,anchor}=binding;
-    if(this.soleViewer(anchor)!==viewer){this.currentPanels.delete(viewKey);continue;}
+    if(this.currentPanels.has(viewKey)||observedThreads.get(threadId)!==1||!this.currentSessionFreshThreads.has(threadId))continue;
+    const viewers=this.viewers.get('local:'+threadId);
+    if(!viewers||viewers.size<2)continue;
+    const remaining=[...viewers].filter(viewer=>!reserved.has(viewer));
+    if(remaining.length!==1)continue;
+    const [viewer]=remaining;
+    remainingByView.set(viewKey,viewer);
+    claims.set(viewer,(claims.get(viewer)||0)+1);
+   }
+   for(const {threadId,viewKey}of this.currentSessions){
+    // Exclusions depend on live evidence and never become document anchors.
+    const remaining=remainingByView.get(viewKey);
+    const viewer=this.currentPanels.get(viewKey)?.viewer||(claims.get(remaining)===1?remaining:null);
+    if(!viewer)continue;
     if(!this.currentSessionFreshThreads.has(threadId)||!this.viewers.get('local:'+threadId)?.has(viewer))continue;
     const id='panel:'+viewer+':local';
     const matching=groups.get(id)?.filter(row=>row.threadId===threadId)||[];

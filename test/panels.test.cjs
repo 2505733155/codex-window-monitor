@@ -134,6 +134,32 @@ test('a temporary missing active marker keeps only the anchor for a verified liv
  assert.equal(row().currentSession,'unconfirmed');
 });
 
+test('a shared session is confirmed on startup when another verified Webview rules out its other viewer',()=>{
+ const s=new MonitorState({currentSession:true});s.connected();
+ s.setViewers('local','shared',['panel-a','panel-b']);snapshot(s,'shared','owner','active');
+ s.setViewers('local','exclusive',['panel-b']);snapshot(s,'exclusive');
+ const row=()=>s.windowSnapshot().rows.find(item=>item.viewClientId==='panel-a');
+ s.setCurrentSessions([observation('shared'),observation('exclusive','webview-b')]);
+ assert.equal(row().status,'busy');
+ assert.equal(row().currentSession,'confirmed');
+ s.setViewers('local','shared',['panel-a','panel-b','panel-c']);
+ assert.equal(row().status,'unknown');
+ s.setViewers('local','shared',['panel-a','panel-b']);
+ assert.equal(row().status,'busy');
+ s.setCurrentSessions([observation('shared')]);
+ assert.equal(row().currentSession,'unconfirmed','losing the other document removes the exclusion');
+});
+
+test('two Webviews competing for the same remaining shared-session viewer stay unconfirmed',()=>{
+ const s=new MonitorState({currentSession:true});s.connected();
+ for(const thread of ['shared-a','shared-b']){
+  s.setViewers('local',thread,['panel-a','panel-b']);snapshot(s,thread);
+ }
+ s.setViewers('local','exclusive',['panel-b']);snapshot(s,'exclusive');
+ s.setCurrentSessions([observation('shared-a'),observation('shared-b','webview-c'),observation('exclusive','webview-b')]);
+ assert.equal(s.windowSnapshot().rows.find(row=>row.viewClientId==='panel-a').currentSession,'unconfirmed');
+});
+
 test('blocking survives a release-first conversation switch but not panel disconnection',()=>{
  const s=new MonitorState();s.connected();s.setViewers('local','a',['panel']);snapshot(s,'a');const id=s.windowSnapshot().rows[0].id;s.setBlocked(id,true,'pause');
  s.setViewers('local','a',[]);s.removeThread('a');assert.equal(s.windowSnapshot().rows.length,0);
