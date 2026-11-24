@@ -3,11 +3,11 @@ const http=require('node:http');const fs=require('node:fs');const path=require('
 const {randomBytes,randomUUID,timingSafeEqual}=require('node:crypto');
 const equal=(a,b)=>typeof a==='string'&&Buffer.byteLength(a)===Buffer.byteLength(b)&&timingSafeEqual(Buffer.from(a),Buffer.from(b));
 const validWindowRequest=value=>!Object.keys(value).some(key=>!['rowId','choiceId'].includes(key))&&typeof value.rowId==='string'&&value.rowId.length>0&&value.rowId.length<=500&&(value.choiceId===undefined||typeof value.choiceId==='string'&&/^[a-f0-9-]{36}$/.test(value.choiceId));
-function jsonRequest(req,validate=validWindowRequest){
+function jsonRequest(req,validate=validWindowRequest,limit=8192){
  return new Promise((resolve,reject)=>{
   const chunks=[];let size=0,finished=false;
   const fail=(message,status=400)=>{if(finished)return;finished=true;reject(Object.assign(new Error(message),{status}));};
-  req.on('data',chunk=>{if(finished)return;size+=chunk.length;if(size>8192){fail('请求过大',413);return;}chunks.push(chunk);});
+  req.on('data',chunk=>{if(finished)return;size+=chunk.length;if(size>limit){fail('请求过大',413);return;}chunks.push(chunk);});
   req.on('error',()=>fail('请求已中断'));req.on('aborted',()=>fail('请求已中断'));
   req.on('end',()=>{
    if(finished)return;
@@ -17,7 +17,7 @@ function jsonRequest(req,validate=validWindowRequest){
   });
  });
 }
-async function createWeb(state,{port=0,token=randomBytes(32).toString('hex'),instanceId=randomUUID(),onStop=()=>{},onWindow,startupTimeoutMs=60000,idleTimeoutMs=10000}={}){
+async function createWeb(state,{port=0,token=randomBytes(32).toString('hex'),instanceId=randomUUID(),onStop=()=>{},onWindow,onRelay,startupTimeoutMs=60000,idleTimeoutMs=10000}={}){
  const clients=new Set();let updateTimer,exitTimer,stopping=false,closed=false,base;
  function requestStop(){
   if(stopping||closed)return;stopping=true;clearTimeout(exitTimer);
@@ -45,6 +45,16 @@ async function createWeb(state,{port=0,token=randomBytes(32).toString('hex'),ins
   if(!equal(cookie,token)&&!equal(bearer,token)){json(403,{error:'请使用启动入口打开面板'});return;}
   if(req.method==='GET'&&url.pathname==='/health'){json(200,{app:'codex-window-monitor',instanceId});return;}
   if(req.method==='GET'&&url.pathname==='/api/state'){json(200,state.windowSnapshot());return;}
+  if(req.method==='POST'&&url.pathname==='/api/app-server'&&onRelay){
+   if(!equal(bearer,token)||req.headers.origin){req.resume();json(403,{error:'invalid relay credentials'});return;}
+   if(req.headers['content-type']!=='application/json'){req.resume();json(415,{error:'invalid relay content type'});return;}
+   jsonRequest(req,()=>true,1024*1024).then(value=>{
+    if(stopping||closed){json(503,{error:'监控正在停止'});return;}
+    if(!onRelay(value)){json(400,{error:'invalid relay snapshot'});return;}
+    json(200,{ok:true});
+   }).catch(error=>{if(!res.destroyed&&!res.writableEnded)json(error.status||500,{error:'无法读取新版 Codex 状态'});});
+   return;
+  }
   if(req.method==='POST'&&url.pathname==='/api/block'){
    if(stopping){req.resume();json(503,{error:'监控正在停止'});return;}
    if(req.headers['content-type']?.split(';')[0].trim().toLowerCase()!=='application/json'){req.resume();json(415,{error:'请发送 JSON 阻塞标记'});return;}

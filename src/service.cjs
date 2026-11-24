@@ -3,6 +3,7 @@ const fs=require('node:fs');const path=require('node:path');const net=require('n
 const {randomUUID,createHash}=require('node:crypto');const {execFile}=require('node:child_process');
 const {MonitorState}=require('./state.cjs');const {Collector}=require('./collector.cjs');const {createWeb}=require('./web.cjs');
 const {WindowNavigator}=require('./windows.cjs');
+const {RelayCollector}=require('./relay-collector.cjs');
 const defaultDir=path.join(__dirname,'../.runtime');
 const pause=ms=>new Promise(resolve=>setTimeout(resolve,ms));
 function readInfo(runtimeDir){
@@ -24,7 +25,8 @@ async function stopRunning(runtimeDir=defaultDir){
  for(let n=0;n<40;n++){if(!await findRunning(runtimeDir))return true;await pause(50);}
  throw new Error('监控尚未退出，请稍后再试');
 }
-async function startService({runtimeDir=defaultDir,port=0,endpoint,startupTimeoutMs=60000,idleTimeoutMs=10000}={}){
+async function startService({runtimeDir=defaultDir,port=0,endpoint,startupTimeoutMs=60000,idleTimeoutMs=10000,
+ relay=fs.existsSync(path.join(runtimeDir,'relay-enabled')),relayLeaseMs}={}){
  fs.mkdirSync(runtimeDir,{recursive:true,mode:0o700});
  const hash=createHash('sha256').update(path.resolve(runtimeDir).toLowerCase()).digest('hex').slice(0,24);
  const lockEndpoint=process.platform==='win32'?'\\\\.\\pipe\\codex-window-monitor-'+hash:path.join(os.tmpdir(),'codex-window-monitor-'+hash+'.sock');
@@ -45,11 +47,14 @@ async function startService({runtimeDir=defaultDir,port=0,endpoint,startupTimeou
  }
  try{
   navigator=new WindowNavigator(()=>state.windowSnapshot(),(id,cwd)=>state.setPanelWorkspace(id,cwd));
-  web=await createWeb(state,{port,instanceId,startupTimeoutMs,idleTimeoutMs,onWindow:value=>navigator.activate(value),onStop:()=>{close().catch(()=>{});}});
+  collector=relay?new RelayCollector(state,relayLeaseMs):new Collector(state,{endpoint});
+  web=await createWeb(state,{port,instanceId,startupTimeoutMs,idleTimeoutMs,
+   onRelay:relay?value=>collector.accept(value):undefined,
+   onWindow:value=>navigator.activate(value),onStop:()=>{close().catch(()=>{});}});
   const info={app:'codex-window-monitor',version:'0.1.0',pid:process.pid,instanceId,port:web.server.address().port,token:web.token,base:web.base,url:web.url,startedAt:new Date().toISOString()};
   const temporary=path.join(runtimeDir,'instance-'+instanceId+'.tmp');
   fs.writeFileSync(temporary,JSON.stringify(info,null,2),{mode:0o600});fs.renameSync(temporary,path.join(runtimeDir,'instance.json'));
-  collector=new Collector(state,{endpoint});collector.start();
+  collector.start();
   return {existing:false,info,state,close};
  }catch(error){await close();throw error;}
 }

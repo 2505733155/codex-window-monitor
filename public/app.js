@@ -14,10 +14,12 @@ function inputNote(row){
  return (count?(sync==='complete'?'':'至少 ')+count+' 个问题待回答':'')+(sync&&sync!=='complete'?(count?' · ':'')+(sync==='partial'?'问题记录未完全同步':'待回答状态未确认'):'');
 }
 function stateNote(row){return [row.reason,inputNote(row)].filter(Boolean).join(' · ');}
+function panelId(row,length){return (row.viewClientId||row.ownerClientId||'').replace(/^relay-/,'').slice(0,length);}
 function panelNote(row){
  if(row.displayKind==='unassigned')return '窗口归属待确认';
  if(row.displayKind!=='panel')return '';
  if(row.workspaceMatched)return '已按匹配工作区汇总';
+ if(row.relayThreadId)return 'Codex 服务 · 按已加载会话汇总';
  return row.requiresWindowSelection?'会话面板 · 前往时选择窗口':'会话面板 · 同名窗口唯一时直接前往';
 }
 function duration(row,precise=false){
@@ -41,7 +43,7 @@ function render(){
  for(const row of visible){
   const tr=element('tr',row.blocked?'blocked-row':''),projectCell=element('td'),project=element('div','project'),folder=element('span','folder','▱'),info=element('div'),name=element('div','project-name',row.name);
   folder.setAttribute('aria-hidden','true');
-  if(row.mapping==='ambiguous'||row.displayKind==='panel')name.append(element('span','short-id',(row.viewClientId||row.ownerClientId).slice(0,6)));
+  if(row.mapping==='ambiguous'||row.displayKind==='panel')name.append(element('span','short-id',panelId(row,6)));
   if(row.sessionCount>1)name.append(element('span','session-count',row.sessionCount+' 个会话'));
   if(row.blocked)name.append(element('span','block-tag','已阻塞'));
   const projectText=row.cwd||(row.projectAmbiguous?'会话项目：'+[...new Set((row.sessions||[]).map(session=>session.name).filter(Boolean))].join('、'):'目录待识别');
@@ -71,7 +73,7 @@ function render(){
 function renderDetail(){
  const original=snapshot.rows.find(row=>row.id===selectedId);if(!original){$('detail').close();return;}const row=effective(original);
  $('detail-title').textContent=row.name;$('detail-fields').replaceChildren();
- const fields=[['会话项目目录',row.cwd||'待识别'],['Codex 状态',statusLabel(row)+' · '+stateNote(row)],['状态持续',duration(row,true)],['窗口对应',panelNote(row)||'窗口归属待确认'],['最后确认',row.lastSeen?new Date(row.lastSeen).toLocaleString():'尚未确认'],['面板标识',row.viewClientId?.slice(0,8)||'尚未确认'],['会话数量',String(row.sessionCount||1)]];
+ const fields=[['会话项目目录',row.cwd||'待识别'],['Codex 状态',statusLabel(row)+' · '+stateNote(row)],['状态持续',duration(row,true)],['窗口对应',panelNote(row)||'窗口归属待确认'],['最后确认',row.lastSeen?new Date(row.lastSeen).toLocaleString():'尚未确认'],['面板标识',row.viewClientId?panelId(row,8):'尚未确认'],['会话数量',String(row.sessionCount||1)]];
  if(row.blocked)fields.splice(2,0,['阻塞原因',row.blockReason||'未填写原因']);
  for(const [title,value]of fields){const dd=element('dd',null,value);if(title==='状态持续')dd.id='detail-duration';$('detail-fields').append(element('dt',null,title),dd);}
  const list=$('detail-sessions');if(list){

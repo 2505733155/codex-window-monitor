@@ -53,13 +53,13 @@ function fail(code='IPC_INVALID_JSON'){throw Object.assign(new Error(code==='IPC
 // Incremental JSON grammar with a schema projection. Discarded strings are
 // validated in place, never concatenated; no buffer scales with frame size.
 class ProjectedJSON{
- constructor(){this.decoder=new TextDecoder('utf-8',{fatal:true,ignoreBOM:true});this.stack=[];this.root=undefined;this.done=false;this.token=null;this.nodes=0;this.characters=0;}
+ constructor(shape=envelope){this.shape=shape;this.decoder=new TextDecoder('utf-8',{fatal:true,ignoreBOM:true});this.stack=[];this.root=undefined;this.done=false;this.token=null;this.nodes=0;this.characters=0;}
  retain(value){
   if(typeof value==='string')this.characters+=value.length;
   else if(value&&typeof value==='object')for(const symbol of Object.getOwnPropertySymbols(value))for(const id of value[symbol]?.ids||[]){this.characters+=id.length;this.nodes++;}
   if(this.characters>8*1024*1024||this.nodes>200000)fail('IPC_JSON_RESOURCE_LIMIT');
  }
- role(){const p=this.stack.at(-1);return p?child(p.role,p.kind==='array'?p.index:p.key,p.out):envelope;}
+ role(){const p=this.stack.at(-1);return p?child(p.role,p.kind==='array'?p.index:p.key,p.out):this.shape;}
  accept(value){
   const p=this.stack.at(-1);
   if(!p){if(this.done)fail();this.root=value;this.done=true;return;}

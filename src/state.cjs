@@ -26,7 +26,7 @@ function classify(value){
 }
 function inputSummary(row,connection){
  if(!row.synced||row.status==='unknown'||connection!=='connected')return {pendingInputCount:0,inputSync:'unknown',awaitingInput:false};
- const input=row.inputState?.summary()||{pendingInputCount:0,inputSync:'unknown'};
+ const input=row.relayThreadId?{pendingInputCount:row.relayQuestions,inputSync:'partial'}:row.inputState?.summary()||{pendingInputCount:0,inputSync:'unknown'};
  const waiting=row.raw?.activeFlags.includes('waitingOnUserInput');
  return {...input,pendingInputCount:Math.max(input.pendingInputCount,waiting?1:0),awaitingInput:!!waiting||input.pendingInputCount>0,
   inputSync:waiting&&!input.pendingInputCount&&input.inputSync==='complete'?'partial':input.inputSync};
@@ -114,6 +114,9 @@ class MonitorState extends EventEmitter{
    if(c.revision<row.minimumRevision||row.revision!==null&&c.revision<row.revision)return false;
    const s=c.conversationState;row.raw=runtime(s.threadRuntimeStatus);
    row.inputState||=new InputState();row.inputState.snapshot(s);
+   if(typeof s.relayThreadId==='string'&&Number.isInteger(s.relayQuestions)){
+    row.relayThreadId=s.relayThreadId;row.relayQuestions=s.relayQuestions;
+   }
    this.setDirectory(row,s.cwd);
 
    row.revision=c.revision;row.minimumRevision=c.revision;row.synced=true;
@@ -191,7 +194,7 @@ class MonitorState extends EventEmitter{
    const reason=missingWorkspace?'等待此工作区的会话状态':members.length===1?representative.reason:members.length+' 个会话：'+Object.keys(counts).filter(key=>counts[key]).map(key=>counts[key]+' '+labels[key]).join('，');
    const pendingInputCount=missingWorkspace?0:members.reduce((sum,row)=>sum+row.pendingInputCount,0),awaitingInput=!missingWorkspace&&members.some(row=>row.awaitingInput);
    const inputSync=missingWorkspace?'unknown':members.every(row=>row.inputSync==='complete')?'complete':members.some(row=>row.inputSync==='unknown')?'unknown':'partial';
-   const sessions=followed.map(row=>({id:row.id,threadId:row.threadId,cwd:row.cwd,name:row.name,status:row.status,reason:row.reason,since:row.since,sinceKnown:row.sinceKnown,lastSeen:row.lastSeen,pendingInputCount:row.pendingInputCount,awaitingInput:row.awaitingInput,inputSync:row.inputSync,shared:(this.viewers.get(row.hostId+':'+row.threadId)?.size||0)>1,outsideWorkspace:!!workspaceKey&&!!row.cwd&&directory(row)!==workspaceKey}));
+   const sessions=followed.map(row=>({id:row.id,threadId:row.relayThreadId||row.threadId,cwd:row.cwd,name:row.name,status:row.status,reason:row.reason,since:row.since,sinceKnown:row.sinceKnown,lastSeen:row.lastSeen,pendingInputCount:row.pendingInputCount,awaitingInput:row.awaitingInput,inputSync:row.inputSync,shared:(this.viewers.get(row.hostId+':'+row.threadId)?.size||0)>1,outsideWorkspace:!!workspaceKey&&!!row.cwd&&directory(row)!==workspaceKey}));
    const ideClientId=project?.ideClientId||null;
    const viewClientId=viewClients.get(id),sharedSessionCount=sessions.filter(row=>row.shared).length;
    rows.push({...representative,id,viewClientId,displayKind:viewClientId?'panel':'unassigned',requiresWindowSelection:!viewClientId||projectAmbiguous||followed.some(row=>!row.cwd),sharedSessionCount,name:project?.name||'多项目面板',cwd:project?.cwd||'',projectAmbiguous,workspaceMatched:!!workspaceKey,blocked:this.windowBlocks.has(id),blockReason:this.windowBlocks.get(id)||'',status,reason,since:timing.since,sinceKnown:timing.sinceKnown,ideClientId,lastSeen:missingWorkspace?null:Math.max(...members.map(row=>row.lastSeen||0))||null,sessionCount:sessions.length,sessions,pendingInputCount,awaitingInput,inputSync});
@@ -203,7 +206,7 @@ class MonitorState extends EventEmitter{
   const counts=new Map();
   for(const row of rows){const key=directory(row);if(key)counts.set(key,(counts.get(key)||0)+1);}
   for(const row of rows)row.mapping=row.projectAmbiguous||counts.get(directory(row))>1?'ambiguous':'unconfirmed';
-  const sessionCount=new Set([...groups.values()].flatMap(members=>members.map(row=>row.hostId+':'+row.threadId))).size;
+  const sessionCount=new Set([...groups.values()].flatMap(members=>members.map(row=>row.hostId+':'+(row.relayThreadId||row.threadId)))).size;
   return {...snapshot,sessionCount,rows};
  }
  snapshot(){
