@@ -53,3 +53,28 @@ test('relay status goes through the normal HTTP state API and expires independen
   fs.rmdirSync(root);
  }
 });
+
+test('plugin metadata fills cwd without replacing live status or loading history rows',()=>{
+ const status=new AppServerStatus();
+ const client=observeLines(message=>status.fromClient(message));
+ const server=observeLines(message=>status.fromServer(message));
+ const send=(input,event)=>input(Buffer.from(JSON.stringify(event)+'\n'));
+ send(server,{method:'thread/status/changed',params:{threadId:'thread-a',status:{type:'active'}}});
+ send(client,{id:1,method:'thread/read',params:{threadId:'thread-a'}});
+ send(server,{id:1,result:{thread:{id:'thread-a',cwd:'D:/fixture',status:{type:'idle'}}}});
+ send(client,{id:2,method:'thread/list'});
+ send(server,{id:2,result:{data:[{id:'stored-only',cwd:'D:/other',status:{type:'idle'}}]}});
+ assert.deepEqual(status.snapshot(),[{threadId:'thread-a',cwd:'D:/fixture',type:'active',flags:[],questions:0}]);
+});
+
+test('relay fills the missing cwd from metadata and normalizes the Windows extended path',()=>{
+ const {MonitorState}=require('../src/state.cjs');
+ const {RelayCollector}=require('../src/relay-collector.cjs');
+ const state=new MonitorState(),collector=new RelayCollector(state,7000,id=>id==='thread-a'?'\\\\?\\D:\\fixture':null);
+ try{
+  collector.accept({source:'11111111-1111-4111-8111-111111111111',sessions:[{threadId:'thread-a',cwd:'',type:'active',flags:[],questions:0}]});
+  const row=state.windowSnapshot().rows[0];
+  state.setPanelWorkspace(row.id,'D:/fixture');
+  assert.equal(state.windowSnapshot().rows[0].status,'busy');
+ }finally{collector.stop();}
+});

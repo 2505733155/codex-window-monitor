@@ -4,8 +4,8 @@ const {ProjectedJSON}=require('./stream-json.cjs');
 const runtimeStatus={type:'type',activeFlags:['type']};
 const thread={id:'id',cwd:'path',status:runtimeStatus};
 const shape={id:'id',method:'id',params:{thread,threadId:'id',turnId:'id',turn:{id:'id'},requestId:'id',status:runtimeStatus},
- result:{thread,status:'type'},error:{code:'number'}};
-const threadMethods=new Set(['thread/start','thread/resume','thread/fork','thread/unsubscribe']);
+ result:{thread,data:[{id:'id',cwd:'path'}],status:'type'},error:{code:'number'}};
+const threadMethods=new Set(['thread/start','thread/resume','thread/fork','thread/unsubscribe','thread/read','thread/list']);
 const statuses=new Set(['idle','active','notLoaded','systemError','unknown']);
 const maxSessions=128;
 
@@ -34,7 +34,7 @@ function requestId(id){
  return Number.isSafeInteger(id)||typeof id==='string'&&id.length<=100?JSON.stringify(id):null;
 }
 class AppServerStatus{
- constructor(){this.sessions=new Map();this.requests=new Map();this.questions=new Map();this.ready=false;}
+ constructor(){this.sessions=new Map();this.requests=new Map();this.questions=new Map();this.directories=new Map();this.ready=false;}
  invalidate(){
   for(const row of this.sessions.values()){row.type='unknown';row.flags=[];}
   this.requests.clear();this.questions.clear();
@@ -45,12 +45,20 @@ class AppServerStatus{
   if(this.requests.size>=512)this.requests.clear();
   this.requests.set(id,{method,threadId:message.params?.threadId});
  }
+ rememberDirectory(id,cwd){
+  if(!validId(id)||typeof cwd!=='string'||!cwd||cwd.length>4096)return;
+  this.directories.delete(id);this.directories.set(id,cwd);
+  if(this.directories.size>512)this.directories.delete(this.directories.keys().next().value);
+  const session=this.sessions.get(id);
+  if(session&&!session.cwd)session.cwd=cwd;
+ }
  store(id,status,cwd){
   if(!validId(id))return;
   if(status?.type==='notLoaded'){this.remove(id);return;}
   if(this.sessions.size>=maxSessions&&!this.sessions.has(id))return;
   const previous=this.sessions.get(id);
-  this.sessions.set(id,{threadId:id,cwd:typeof cwd==='string'?cwd.slice(0,4096):previous?.cwd||'',
+  this.rememberDirectory(id,cwd);
+  this.sessions.set(id,{threadId:id,cwd:typeof cwd==='string'&&cwd&&cwd.length<=4096?cwd:previous?.cwd||this.directories.get(id)||'',
    type:statuses.has(status?.type)?status.type:'unknown',
    flags:Array.isArray(status?.activeFlags)?status.activeFlags.filter(flag=>typeof flag==='string'&&flag.length<=50).slice(0,20):[]});
  }
@@ -89,6 +97,14 @@ class AppServerStatus{
    return;
   }
   const value=message.result.thread;
+  if(request.method==='thread/read'){
+   if(value?.id===request.threadId)this.rememberDirectory(value.id,value.cwd);
+   return;
+  }
+  if(request.method==='thread/list'){
+   if(Array.isArray(message.result.data))for(const item of message.result.data)this.rememberDirectory(item?.id,item?.cwd);
+   return;
+  }
   if(value)this.store(value.id,value.status,value.cwd);
  }
  snapshot(){

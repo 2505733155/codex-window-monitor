@@ -5,7 +5,8 @@ const {InputState}=require('./input-state.cjs');
 const {STREAM_VERSIONS,supportsStreamVersion}=require('./protocol.cjs');
 function normalizeDirectory(cwd){
  if(!cwd)return '';
- let value=path.win32.normalize(cwd);const root=path.win32.parse(value).root;
+ let value=cwd.replace(/^\\\\\?\\UNC\\/i,'\\\\').replace(/^\\\\\?\\(?=[a-z]:\\)/i,'');
+ value=path.win32.normalize(value);const root=path.win32.parse(value).root;
  while(value.length>root.length&&value.endsWith(path.win32.sep))value=value.slice(0,-1);
  return value.toLowerCase();
 }
